@@ -1,0 +1,107 @@
+﻿# 飞书录入节点定义。
+#
+# 设计原则：
+# - 物理上一个飞书录入表对应一个节点目录、一个 node.yaml。
+# - 逻辑上 node.yaml 分为 node/source/storage/runtime/tasks，后续复杂后可以自然拆分。
+# - table_mapping.yaml 只负责字段映射，不再放读取过滤条件。
+
+version: 1
+
+node:
+  # 节点内部编码。
+  # 必须与当前目录名、table_mapping.yaml 的 table_code、
+  # writeback.yaml/distribution.yaml 的 source_table_code 保持一致。
+  node_code: product_intake_poc
+
+  # 节点中文名称，用于命令行、日志、通知、配置检查时展示。
+  node_name: 产品录入POC节点
+
+  # 是否启用。
+  # false 时，批量运行应跳过该节点。
+  enabled: true
+
+  # 节点说明。
+  description: 验证飞书录入、标准入库、回写和多目标分发的单节点样例
+
+source:
+  # 来源类型。当前只实现飞书多维表格，后续可扩展 yingdao/python_crawler/api 等。
+  type: feishu_bitable
+
+  # 来源飞书多维表格 app_token。
+  # 这是多维表格 token，不是自建应用的 App ID/App Secret，也不是 tenant_access_token。
+  # api-test-用户创建
+  # https://zoolanx2026.feishu.cn/base/YCw0bxHEDah4YZsonzZc5pJsn8j?table=tbleu4APzm8lD3Ke&view=vewGev3A27
+  app_token: "YCw0bxHEDah4YZsonzZc5pJsn8j"
+
+  # 来源飞书数据表 table_id。
+  table_id: "tbleu4APzm8lD3Ke"
+
+  # 可选：来源视图 ID。
+  # 如果为空，读取来源表中符合任务 read_filter 的记录。
+  view_id:
+
+  # 来源飞书表里的最后更新时间字段名。
+  # 建议在飞书多维表格中添加自动字段“最后更新时间”。
+  updated_at_field: "最后更新时间"
+
+storage:
+  # 当前 POC 使用专用 ODS 表。
+  # 正式设计可逐步收敛到通用 ods.feishu_bitable_record_raw 当前态表。
+  ods_table: ods.feishu_product_intake_raw
+
+  # 当前节点标准业务表。
+  # target=column 的字段必须在这张表中有真实物理列。
+  biz_table: biz.product_intake_poc
+
+runtime:
+  # 每次调用飞书 API 的读取批量。
+  batch_size: 100
+
+  # 是否允许回写来源飞书表。
+  allow_writeback: true
+
+  # 是否允许创建下游分发任务。
+  allow_distribution: true
+
+  # 是否允许在主流程中立即写入下游飞书目标表。
+  # 正式阶段推荐 false，由分发执行器异步处理。
+  allow_execute_distribution_immediately: true
+
+tasks:
+  - task_code: incremental
+    task_name: 增量同步
+    task_type: incremental_sync
+    enabled: true
+    description: 每20分钟读取近30分钟内更新且开发完成的数据，日常使用。
+    schedule:
+      type: cron
+      expression: "*/20 * * * *"
+    read_filter:
+      logic: and
+      conditions:
+        - field: "开发状态"
+          operator: "="
+          value: "已完成"
+        - field: "最后更新时间"
+          operator: ">="
+          value_mode: relative_time
+          value: "-30m"
+
+  - task_code: reconcile
+    task_name: 兜底校准
+    task_type: reconcile_sync
+    enabled: true
+    description: 每天低峰期读取近3天开发完成数据，修复漏读和异常中断。
+    schedule:
+      type: cron
+      expression: "0 2 * * *"
+    read_filter:
+      logic: and
+      conditions:
+        - field: "开发状态"
+          operator: "="
+          value: "已完成"
+        - field: "最后更新时间"
+          operator: ">="
+          value_mode: relative_time
+          value: "-3d"

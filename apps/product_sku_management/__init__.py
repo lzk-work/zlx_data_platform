@@ -1,0 +1,1 @@
+"""Product SKU management app."""

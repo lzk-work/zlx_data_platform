@@ -1,0 +1,15 @@
+app:
+  batch_timezone: Asia/Shanghai
+  run_mode: platform
+
+database:
+  url_env: SKU_SOURCE_UPDATE_DATABASE_URL
+  url: "postgresql://postgres:lzk123.0@localhost:5432/postgres"
+  schema: zlx_1
+
+paths:
+  input: apps/sku_source_update_poc/data/input/平台SKU货源预校正输入表.xlsx
+  output_dir: apps/sku_source_update_poc/data/output
+
+excel:
+  default_sheet_name: null

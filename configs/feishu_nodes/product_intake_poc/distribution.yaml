@@ -1,0 +1,55 @@
+# 飞书下游分发配置。
+#
+# 一个 distribution.yaml 只描述当前来源节点的下游分发目标。
+# targets 下的每个 "-" 表示一个目标飞书表。
+
+source_table_code: product_intake_poc
+
+targets:
+  - target_table_code: sourcing_task_poc1
+    enabled: true
+    execute_immediately: true
+    action_type: create
+    target:
+      app_token: QHrhbtmkRaW2ays8aFGc9aOGnjh
+      table_id: tblMqAD2MmKNs3v8
+    fields:
+      product_name:
+        feishu_field: "产品名称"
+        value_from: column_fields.product_name
+
+      source_url:
+        feishu_field: "来源链接"
+        value_from: column_fields.source_url
+
+      develop_status:
+        feishu_field: "开发状态"
+        value_from: column_fields.develop_status
+
+      product_features_1:
+        feishu_field: "产品特点1"
+        value_from: dynamic_attributes.product_features_1
+
+  - target_table_code: sourcing_task_poc2
+    enabled: true
+    execute_immediately: true
+    action_type: create
+    target:
+      app_token: QHrhbtmkRaW2ays8aFGc9aOGnjh
+      table_id: tblqFuDcdk4xuUTY
+    fields:
+      product_name:
+        feishu_field: "产品名称"
+        value_from: column_fields.product_name
+
+      source_url:
+        feishu_field: "来源链接"
+        value_from: column_fields.source_url
+
+      develop_status:
+        feishu_field: "开发状态"
+        value_from: column_fields.develop_status
+
+      product_features_1:
+        feishu_field: "产品特点1"
+        value_from: dynamic_attributes.product_features_1

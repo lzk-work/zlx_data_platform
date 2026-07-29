@@ -1,0 +1,41 @@
+﻿# Local-only config files
+configs/local/*
+!configs/local/.gitkeep
+
+# Secrets and env files
+.env
+*.env
+!example.env
+
+# Runtime outputs
+logs/*
+!logs/.gitkeep
+tmp/*
+!tmp/.gitkeep
+
+# Data files
+*.xlsx
+*.xls
+*.csv
+*.zip
+*.rar
+*.7z
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

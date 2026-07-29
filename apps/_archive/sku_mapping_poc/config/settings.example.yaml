@@ -1,0 +1,27 @@
+﻿app:
+  batch_timezone: Asia/Shanghai
+  product_source_mode: db
+
+database:
+  url_env: SKU_MAPPING_DATABASE_URL
+  url: "postgresql://postgres:lzk123.0@localhost:5432/postgres"
+  schema: zlx_1
+
+paths:
+  daily_input: apps/sku_mapping_poc/data/input/每日出单平台SKU输入表.xlsx
+  uploaded_product_skus: apps/sku_mapping_poc/data/state/已上传商品SKU产品表.xlsx
+  historical_ordered_platform_skus: apps/sku_mapping_poc/data/state/历史出单平台SKU表.xlsx
+  product_sku_platform_sku_mapping: apps/sku_mapping_poc/data/state/商品SKU-平台SKU映射关系表.xlsx
+  output_dir: apps/sku_mapping_poc/data/output
+
+excel:
+  default_sheet_name: null
+  erp_platform_sku_separator: "\n"
+
+sku_generation:
+  strategy: category_code_date_sequence
+  category_code_source: first_category_code
+
+rules:
+  allow_initialize_empty_state: true
+  write_failed_rows_to_history: false

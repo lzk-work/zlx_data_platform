@@ -1,0 +1,27 @@
+# 飞书来源表回写配置。
+#
+# writeback 只负责更新来源表原记录，也就是按 record_id 回写当前多维表格这一行。
+# 下游新增数据不要放在这里，应该放到 distribution.yaml。
+
+source_table_code: product_intake_poc
+
+fields:
+  db_intake_id:
+    feishu_field: "中台录入ID"
+    value_from: db_intake_id
+    type: text
+
+  validation_status:
+    feishu_field: "校验状态"
+    value_from: validation_status
+    type: text
+
+  validation_message:
+    feishu_field: "校验结果"
+    value_from: validation_message
+    type: text
+
+  sync_status:
+    feishu_field: "同步状态"
+    value_from: sync_status
+    type: text

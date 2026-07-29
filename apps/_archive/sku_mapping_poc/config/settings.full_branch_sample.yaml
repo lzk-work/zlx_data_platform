@@ -1,0 +1,20 @@
+app:
+  batch_timezone: Asia/Shanghai
+  product_source_mode: excel
+
+paths:
+  daily_input: apps/sku_mapping_poc/data/samples/full_branch_case/input/每日出单平台SKU输入表.xlsx
+  product_sku_master: apps/sku_mapping_poc/data/samples/full_branch_case/source/商品基础库Excel兼容表.xlsx
+  first_category_codes: apps/sku_mapping_poc/data/samples/full_branch_case/source/一级类目编码表.xlsx
+  uploaded_product_skus: apps/sku_mapping_poc/data/samples/full_branch_case/state/已上传商品SKU产品表.xlsx
+  historical_ordered_platform_skus: apps/sku_mapping_poc/data/samples/full_branch_case/state/历史出单平台SKU表.xlsx
+  product_sku_platform_sku_mapping: apps/sku_mapping_poc/data/samples/full_branch_case/state/商品SKU-平台SKU映射关系表.xlsx
+  output_dir: apps/sku_mapping_poc/data/samples/full_branch_case/output
+
+excel:
+  default_sheet_name: null
+  erp_platform_sku_separator: "\n"
+
+rules:
+  allow_initialize_empty_state: true
+  write_failed_rows_to_history: false

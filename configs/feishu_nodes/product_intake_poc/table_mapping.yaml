@@ -1,0 +1,47 @@
+﻿# 飞书来源录入表字段映射配置。
+#
+# 作用：
+# 1. 告诉程序飞书字段名对应哪个内部英文字段。
+# 2. 告诉程序字段应该写入数据库物理列，还是写入动态 JSON。
+# 3. 告诉程序哪些字段必填、字段类型是什么。
+#
+# 注意：
+# - 一个飞书来源录入表，对应一份 table_mapping.yaml。
+# - target=column 的字段必须在标准业务表中有真实物理列。
+# - target=dynamic_attributes 的字段会进入 dynamic_attributes JSON。
+# - raw_payload 不需要配置，程序会自动保存飞书 API 返回的原始整行 JSON 到 ODS 表。
+# - 读取过滤条件不放在本文件，统一放到 node.yaml 的 tasks[].read_filter。
+
+table_code: product_intake_poc
+
+
+fields:
+  product_name:
+    feishu_field: "产品名称"
+    target: column
+    required: true
+    type: text
+
+  source_url:
+    feishu_field: "来源链接"
+    target: column
+    required: false
+    type: text
+
+  develop_status:
+    feishu_field: "开发状态"
+    target: column
+    required: false
+    type: text
+
+  product_features_1:
+    feishu_field: "产品特点1"
+    target: dynamic_attributes
+    required: false
+    type: text
+
+  product_features_2:
+    feishu_field: "产品特点2"
+    target: dynamic_attributes
+    required: false
+    type: text

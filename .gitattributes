@@ -1,0 +1,21 @@
+﻿* text=auto
+*.md text eol=lf
+*.sql text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.xlsx binary
+*.xls binary
+*.csv text eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.pdf binary
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+*.editorconfig text eol=lf
+*.env.example text eol=lf
+*.example text eol=lf
