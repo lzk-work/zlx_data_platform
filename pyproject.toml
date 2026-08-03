@@ -12,7 +12,13 @@ dependencies = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "apps/feishu_intake_poc/tests", "apps/sku_mapping_poc/tests", "apps/sku_source_update_poc/tests"]
+testpaths = [
+    "tests",
+    "apps/feishu_intake_poc/tests",
+    "apps/sku_mapping_poc/tests",
+    "apps/sku_source_update_poc/tests",
+    "apps/product_sku_management/tests",
+]
 markers = [
     "integration: tests that call real external systems or services",
     "external: tests that require network or third-party credentials",

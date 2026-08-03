@@ -12,6 +12,8 @@ logs/*
 !logs/.gitkeep
 tmp/*
 !tmp/.gitkeep
+apps/product_sku_management/data/output/*
+!apps/product_sku_management/data/output/.gitkeep
 
 # Data files
 *.xlsx
