@@ -1,0 +1,18 @@
+database:
+  dsn: postgresql://user:password@localhost:5432/zlx_test
+  schema: sku_mgmt
+  sql_path: src/sql/001_create_sku_mgmt_tables.sql
+
+input:
+  platform_listing_file: data/input/platform_sku_sample.xlsx
+
+output:
+  output_dir: data/output
+
+templates:
+  product_sku: data/input/dianxiaomi_templates/template_product_sku_sample.xlsx
+  bundle_sku: data/input/dianxiaomi_templates/template_bundle_sku_sample.xlsx
+  platform_pair: data/input/dianxiaomi_templates/template_platform_sku_sample.xlsx
+
+export:
+  exchange_rate_usd: 6.8
