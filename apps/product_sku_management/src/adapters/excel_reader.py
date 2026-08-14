@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -132,10 +133,26 @@ def optional_decimal(value: object, field_name: str) -> Decimal | None:
     """
     if value in (None, ""):
         return None
+    decimal_text = normalize_decimal_text(value)
+    if not decimal_text:
+        return None
     try:
-        return Decimal(str(value).strip())
+        return Decimal(decimal_text)
     except (InvalidOperation, AttributeError) as exc:
         raise ValueError(f"{field_name}必须是数字") from exc
+
+
+def normalize_decimal_text(value: object) -> str:
+    """清理Excel数字文本中的不可见格式字符。
+
+    Args:
+        value: 单元格原始值。
+
+    Returns:
+        str: 去除首尾空白和Unicode格式控制字符后的数字文本。
+    """
+    text = str(value).strip()
+    return "".join(char for char in text if unicodedata.category(char) != "Cf").strip()
 
 
 def optional_dimension(value: object, field_name: str) -> Decimal | None:
@@ -152,9 +169,11 @@ def optional_dimension(value: object, field_name: str) -> Decimal | None:
         ValueError: 非数字内容无法转换时抛出。
     """
     decimal_value = optional_decimal(value, field_name)
+    if decimal_value is None:
+        return None
     if decimal_value == Decimal("0"):
         return None
-    return decimal_value
+    return decimal_value.quantize(Decimal("0.0001"))
 
 
 def is_empty_row(row: tuple[Any, ...]) -> bool:

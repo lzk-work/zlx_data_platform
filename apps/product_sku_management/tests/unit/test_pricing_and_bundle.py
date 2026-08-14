@@ -3,12 +3,12 @@
 from decimal import Decimal
 
 from apps.product_sku_management.src.constants import (
+    SALES_UNIT_TYPE_FORCED_PRODUCT_SKU,
     SALES_UNIT_TYPE_MULTI_PRODUCT_SET,
-    SALES_UNIT_TYPE_SAME_PRODUCT_MULTI_QTY,
     SALES_UNIT_TYPE_SINGLE_PRODUCT,
 )
 from apps.product_sku_management.src.domain.bundle_service import decide_bundle
-from apps.product_sku_management.src.domain.name_builder import build_bundle_name, build_product_name
+from apps.product_sku_management.src.domain.name_builder import build_bundle_name, build_forced_package_name, build_product_name
 from apps.product_sku_management.src.domain.pricing_weight_calculator import calculate_reference_value, kg_to_g
 from apps.product_sku_management.src.domain.spec_parser import parse_spec
 from apps.product_sku_management.src.models.domain_models import ParsedSourceItem
@@ -23,8 +23,10 @@ def test_pricing_weight_calculator_converts_kg_to_g_and_calculates_average() -> 
 
 
 def test_name_builder_uses_slashes_and_quantity_suffix() -> None:
-    assert build_product_name(("白色", "均码"), 2) == "白色，均码---数量1"
+    assert build_product_name(("白色", "均码"), 1) == "白色，均码---数量1"
+    assert build_product_name(("白色", "均码"), 2) == "2个/组，白色，均码---数量2"
     assert build_bundle_name(parse_spec("（白色||均码||1）（肤色||均码||2）")) == "3 个/组，白色，均码---数量1，肤色，均码---数量2"
+    assert build_forced_package_name(parse_spec("(A||1)(B||1)(C||1)(D||1)")) == "4个/组，A---数量1，B---数量1，C---数量1，D---数量1"
 
 
 def test_bundle_decision_single_quantity_one_maps_to_product_sku() -> None:
@@ -34,11 +36,11 @@ def test_bundle_decision_single_quantity_one_maps_to_product_sku() -> None:
     assert decision.sales_unit_type == SALES_UNIT_TYPE_SINGLE_PRODUCT
 
 
-def test_bundle_decision_single_quantity_gt_one_maps_to_bundle_sku() -> None:
+def test_bundle_decision_single_quantity_gt_one_maps_to_product_sku() -> None:
     decision = decide_bundle((item(quantity=2, spec="白色||均码"),))
 
-    assert decision.needs_bundle is True
-    assert decision.sales_unit_type == SALES_UNIT_TYPE_SAME_PRODUCT_MULTI_QTY
+    assert decision.needs_bundle is False
+    assert decision.sales_unit_type == SALES_UNIT_TYPE_SINGLE_PRODUCT
 
 
 def test_bundle_decision_multiple_items_maps_to_bundle_sku() -> None:
@@ -46,6 +48,20 @@ def test_bundle_decision_multiple_items_maps_to_bundle_sku() -> None:
 
     assert decision.needs_bundle is True
     assert decision.sales_unit_type == SALES_UNIT_TYPE_MULTI_PRODUCT_SET
+
+
+def test_bundle_decision_more_than_three_items_maps_to_forced_product_sku() -> None:
+    decision = decide_bundle(
+        (
+            item(quantity=1, spec="白色||均码"),
+            item(quantity=1, spec="肤色||均码"),
+            item(quantity=1, spec="黑色||均码"),
+            item(quantity=1, spec="蓝色||均码"),
+        )
+    )
+
+    assert decision.needs_bundle is False
+    assert decision.sales_unit_type == SALES_UNIT_TYPE_FORCED_PRODUCT_SKU
 
 
 def item(quantity: int, spec: str) -> ParsedSourceItem:

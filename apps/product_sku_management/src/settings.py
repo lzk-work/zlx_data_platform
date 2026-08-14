@@ -18,7 +18,8 @@ class ProductSkuSettings:
 
     database_url: str
     schema_name: str
-    platform_listing_file: Path
+    platform_listing_supplement_file: Path
+    platform_listing_update_file: Path
     output_dir: Path
     product_sku_template: Path
     bundle_sku_template: Path
@@ -56,7 +57,16 @@ def load_settings(config_path: str | Path | None = None) -> ProductSkuSettings:
     return ProductSkuSettings(
         database_url=str(database_url),
         schema_name=str(raw_config.get("database", {}).get("schema") or SCHEMA_NAME),
-        platform_listing_file=resolve_path(app_root, input_config.get("platform_listing_file"), "data/input/platform_sku_sample.xlsx"),
+        platform_listing_supplement_file=resolve_path(
+            app_root,
+            input_config.get("platform_listing_supplement_file"),
+            "data/input/platform_sku_supplement.xlsx",
+        ),
+        platform_listing_update_file=resolve_path(
+            app_root,
+            input_config.get("platform_listing_update_file"),
+            "data/input/platform_sku_update.xlsx",
+        ),
         output_dir=resolve_path(app_root, output_config.get("output_dir"), "data/output"),
         product_sku_template=resolve_path(
             app_root,

@@ -52,6 +52,10 @@ def split_outer_parenthesized_details(text: str) -> tuple[str, ...]:
     chunks: list[str] = []
     index = 0
     while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index == len(text):
+            break
         if text[index] not in OPEN_PARENS:
             return ()
 
@@ -93,6 +97,8 @@ def find_outer_group_close(text: str, start_index: int) -> int | None:
             continue
 
         next_index = index + 1
+        while next_index < len(text) and text[next_index].isspace():
+            next_index += 1
         if next_index == len(text) or text[next_index] in OPEN_PARENS:
             return index
         return None

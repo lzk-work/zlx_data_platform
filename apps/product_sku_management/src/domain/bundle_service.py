@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from ..constants import (
+    SALES_UNIT_TYPE_FORCED_PRODUCT_SKU,
     SALES_UNIT_TYPE_MULTI_PRODUCT_SET,
-    SALES_UNIT_TYPE_SAME_PRODUCT_MULTI_QTY,
     SALES_UNIT_TYPE_SINGLE_PRODUCT,
 )
 from ..models.domain_models import BundleDecision, ParsedSourceItem
@@ -25,23 +25,28 @@ def decide_bundle(items: tuple[ParsedSourceItem, ...]) -> BundleDecision:
     if not items:
         raise ValueError("组合明细不能为空")
 
-    total_product_count = sum(item.quantity for item in items)
-    distinct_count = len({(item.source_url, item.spec) for item in items})
+    total_product_count = len(items)
+    distinct_count = len({(item.source_url, item.spec, item.quantity) for item in items})
 
-    if len(items) == 1 and items[0].quantity == 1:
+    if len(items) == 1:
         return BundleDecision(
             needs_bundle=False,
             sales_unit_type=SALES_UNIT_TYPE_SINGLE_PRODUCT,
-            total_product_count=1,
+            total_product_count=total_product_count,
             distinct_product_sku_count=1,
         )
 
-    sales_unit_type = (
-        SALES_UNIT_TYPE_SAME_PRODUCT_MULTI_QTY if len(items) == 1 else SALES_UNIT_TYPE_MULTI_PRODUCT_SET
-    )
+    if len(items) > 3:
+        return BundleDecision(
+            needs_bundle=False,
+            sales_unit_type=SALES_UNIT_TYPE_FORCED_PRODUCT_SKU,
+            total_product_count=total_product_count,
+            distinct_product_sku_count=distinct_count,
+        )
+
     return BundleDecision(
         needs_bundle=True,
-        sales_unit_type=sales_unit_type,
+        sales_unit_type=SALES_UNIT_TYPE_MULTI_PRODUCT_SET,
         total_product_count=total_product_count,
         distinct_product_sku_count=distinct_count,
     )

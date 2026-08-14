@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,10 @@ class ProductSkuRecord:
     source_url: str
     source_platform: str
     spec: str
+    quantity: int
+    product_sku_type: str
+    package_fingerprint: str | None
+    package_details: tuple[dict[str, Any], ...]
     product_name: str
     main_image_url: str
     first_level_category: str
@@ -59,6 +64,10 @@ class ProductSkuRecord:
     chinese_customs_name: str
     logistics_attribute: str
     note: str
+    length_cm: Decimal | None = None
+    width_cm: Decimal | None = None
+    height_cm: Decimal | None = None
+    is_direct_sales_unit: bool = False
     created: bool = False
 
 

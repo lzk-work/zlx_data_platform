@@ -20,6 +20,10 @@ create table if not exists sku_mgmt.product_sku (
     product_sku_variant_code text,
     source_url text not null,
     spec text not null,
+    quantity integer not null default 1,
+    product_sku_type text not null default 'normal',
+    package_fingerprint text,
+    package_details_json jsonb not null default '[]'::jsonb,
     source_image_url text,
     main_image_url text,
     supplier text,
@@ -30,11 +34,23 @@ create table if not exists sku_mgmt.product_sku (
     chinese_customs_name text,
     logistics_attribute text,
     note text,
+    length_cm numeric(18, 4),
+    width_cm numeric(18, 4),
+    height_cm numeric(18, 4),
+    is_direct_sales_unit boolean not null default false,
     created_at timestamp not null default (now() at time zone 'Asia/Shanghai'),
     updated_at timestamp not null default (now() at time zone 'Asia/Shanghai'),
-    constraint uq_product_sku_source_spec unique (source_url, spec),
+    constraint ck_product_sku_quantity check (quantity > 0),
+    constraint ck_product_sku_type check (product_sku_type in ('normal', 'forced_package')),
+    constraint ck_product_sku_forced_package_fingerprint check (
+        (product_sku_type = 'normal' and package_fingerprint is null)
+        or (product_sku_type = 'forced_package' and package_fingerprint is not null)
+    ),
     constraint ck_product_sku_reference_purchase_price_rmb check (reference_purchase_price_rmb >= 0),
-    constraint ck_product_sku_reference_weight_g check (reference_weight_g >= 0)
+    constraint ck_product_sku_reference_weight_g check (reference_weight_g >= 0),
+    constraint ck_product_sku_length_cm check (length_cm is null or length_cm > 0),
+    constraint ck_product_sku_width_cm check (width_cm is null or width_cm > 0),
+    constraint ck_product_sku_height_cm check (height_cm is null or height_cm > 0)
 );
 
 create index if not exists idx_product_sku_variant_code
@@ -46,6 +62,7 @@ create table if not exists sku_mgmt.product_sku_source (
     source_platform text not null,
     source_url text not null,
     spec text not null,
+    quantity integer not null default 1,
     supplier text,
     reference_purchase_price_rmb numeric(18, 4) not null default 0,
     reference_weight_g numeric(18, 4) not null default 0,
@@ -54,7 +71,8 @@ create table if not exists sku_mgmt.product_sku_source (
     note text,
     created_at timestamp not null default (now() at time zone 'Asia/Shanghai'),
     updated_at timestamp not null default (now() at time zone 'Asia/Shanghai'),
-    constraint uq_product_sku_source_platform_url_spec unique (source_platform, source_url, spec),
+    constraint uq_product_sku_source_platform_url_spec_quantity unique (source_platform, source_url, spec, quantity),
+    constraint ck_product_sku_source_quantity check (quantity > 0),
     constraint ck_product_sku_source_status check (source_status in ('active', 'inactive', 'candidate')),
     constraint ck_product_sku_source_reference_purchase_price_rmb check (reference_purchase_price_rmb >= 0),
     constraint ck_product_sku_source_reference_weight_g check (reference_weight_g >= 0)
@@ -76,6 +94,9 @@ create table if not exists sku_mgmt.bundle_sku (
     logistics_attribute text,
     reference_total_purchase_price_rmb numeric(18, 4) not null default 0,
     reference_total_weight_g numeric(18, 4) not null default 0,
+    length_cm numeric(18, 4),
+    width_cm numeric(18, 4),
+    height_cm numeric(18, 4),
     note text,
     created_at timestamp not null default (now() at time zone 'Asia/Shanghai'),
     updated_at timestamp not null default (now() at time zone 'Asia/Shanghai'),
@@ -293,8 +314,65 @@ create index if not exists idx_dianxiaomi_export_plan_batch_action
 alter table sku_mgmt.product_sku
     add column if not exists logistics_attribute text;
 
+alter table sku_mgmt.product_sku
+    add column if not exists quantity integer not null default 1;
+
+alter table sku_mgmt.product_sku
+    add column if not exists product_sku_type text not null default 'normal';
+
+alter table sku_mgmt.product_sku
+    add column if not exists package_fingerprint text;
+
+alter table sku_mgmt.product_sku
+    add column if not exists package_details_json jsonb not null default '[]'::jsonb;
+
+alter table sku_mgmt.product_sku
+    add column if not exists length_cm numeric(18, 4);
+
+alter table sku_mgmt.product_sku
+    add column if not exists width_cm numeric(18, 4);
+
+alter table sku_mgmt.product_sku
+    add column if not exists height_cm numeric(18, 4);
+
+alter table sku_mgmt.product_sku
+    add column if not exists is_direct_sales_unit boolean not null default false;
+
+alter table sku_mgmt.product_sku
+    drop constraint if exists uq_product_sku_source_spec;
+
+alter table sku_mgmt.product_sku_source
+    add column if not exists quantity integer not null default 1;
+
+alter table sku_mgmt.product_sku_source
+    drop constraint if exists uq_product_sku_source_platform_url_spec;
+
+alter table sku_mgmt.product_sku_source
+    drop constraint if exists uq_product_sku_source_platform_url_spec_quantity;
+
+alter table sku_mgmt.product_sku_source
+    add constraint uq_product_sku_source_platform_url_spec_quantity
+    unique (source_platform, source_url, spec, quantity);
+
+create unique index if not exists uq_product_sku_normal_identity
+    on sku_mgmt.product_sku (source_url, spec, quantity)
+    where product_sku_type = 'normal';
+
+create unique index if not exists uq_product_sku_forced_package_fingerprint
+    on sku_mgmt.product_sku (package_fingerprint)
+    where product_sku_type = 'forced_package';
+
 alter table sku_mgmt.bundle_sku
     add column if not exists logistics_attribute text;
+
+alter table sku_mgmt.bundle_sku
+    add column if not exists length_cm numeric(18, 4);
+
+alter table sku_mgmt.bundle_sku
+    add column if not exists width_cm numeric(18, 4);
+
+alter table sku_mgmt.bundle_sku
+    add column if not exists height_cm numeric(18, 4);
 
 comment on table sku_mgmt.sku_code_counter is 'SKU编码流水当前值表，只记录每个取号维度的最大值，不记录每次取号流水。';
 comment on column sku_mgmt.sku_code_counter.counter_type is '编码类型，product_sku表示商品SKU，bundle_sku表示组合SKU。';
@@ -304,11 +382,15 @@ comment on column sku_mgmt.sku_code_counter.updated_at is '流水值最后更新
 
 comment on sequence sku_mgmt.product_sku_variant_seq is '商品SKU款式组内部编码序列，预留给开发SKU归并流程使用。';
 
-comment on table sku_mgmt.product_sku is '商品SKU主表，按清洗后货源链接和去掉数量后的规格文本识别唯一商品SKU。';
+comment on table sku_mgmt.product_sku is '商品SKU主表，普通商品SKU按清洗后货源链接、去掉数量后的规格文本和数量识别；强制合包商品SKU按package_fingerprint识别。';
 comment on column sku_mgmt.product_sku.product_sku is '系统生成的商品SKU编码，格式为类目代号_YYMMDD_日流水。';
 comment on column sku_mgmt.product_sku.product_sku_variant_code is '商品SKU款式组编码，预留用于开发SKU或款式归并。';
 comment on column sku_mgmt.product_sku.source_url is '清洗后的原始货源链接，第一版主要来自1688链接。';
-comment on column sku_mgmt.product_sku.spec is '去掉数量后的规格文本，数量不进入商品SKU身份。';
+comment on column sku_mgmt.product_sku.spec is '去掉数量后的规格文本。';
+comment on column sku_mgmt.product_sku.quantity is '商品SKU身份数量，普通商品SKU按source_url、spec、quantity唯一识别。';
+comment on column sku_mgmt.product_sku.product_sku_type is '商品SKU类型，normal普通商品SKU，forced_package超过3个商品SKU明细强制合包商品SKU。';
+comment on column sku_mgmt.product_sku.package_fingerprint is '强制合包商品SKU结构化明细指纹，普通商品SKU为空。';
+comment on column sku_mgmt.product_sku.package_details_json is '强制合包商品SKU采购辨识明细JSON，普通商品SKU为空数组。';
 comment on column sku_mgmt.product_sku.source_image_url is '货源规格图片或货源图片原链接。';
 comment on column sku_mgmt.product_sku.main_image_url is '商品SKU主图链接，第一版沿用货源或平台侧可用图片。';
 comment on column sku_mgmt.product_sku.supplier is '供应商名称，第一版可为空。';
@@ -319,6 +401,10 @@ comment on column sku_mgmt.product_sku.reference_weight_g is '参考重量，单
 comment on column sku_mgmt.product_sku.chinese_customs_name is '中文报关名，第一版按输入或规则保留。';
 comment on column sku_mgmt.product_sku.logistics_attribute is '产品属性，来自平台SKU输入属性字段，如普货、带电、敏感。';
 comment on column sku_mgmt.product_sku.note is '商品SKU备注。';
+comment on column sku_mgmt.product_sku.length_cm is '商品SKU直接承接销售单元时的包装长，单位厘米；仅作为组合成员时可为空。';
+comment on column sku_mgmt.product_sku.width_cm is '商品SKU直接承接销售单元时的包装宽，单位厘米；仅作为组合成员时可为空。';
+comment on column sku_mgmt.product_sku.height_cm is '商品SKU直接承接销售单元时的包装高，单位厘米；仅作为组合成员时可为空。';
+comment on column sku_mgmt.product_sku.is_direct_sales_unit is '是否直接承接过平台SKU销售单元；商品SKU作为组合成员时不清空该状态。';
 comment on column sku_mgmt.product_sku.created_at is '创建时间，Asia/Shanghai本地时间。';
 comment on column sku_mgmt.product_sku.updated_at is '更新时间，Asia/Shanghai本地时间。';
 
@@ -328,6 +414,7 @@ comment on column sku_mgmt.product_sku_source.product_sku is '关联的商品SKU
 comment on column sku_mgmt.product_sku_source.source_platform is '货源平台，如1688、taobao、tmall。';
 comment on column sku_mgmt.product_sku_source.source_url is '清洗后的货源链接。';
 comment on column sku_mgmt.product_sku_source.spec is '去掉数量后的货源规格文本。';
+comment on column sku_mgmt.product_sku_source.quantity is '商品SKU身份数量。';
 comment on column sku_mgmt.product_sku_source.supplier is '供应商名称。';
 comment on column sku_mgmt.product_sku_source.reference_purchase_price_rmb is '该货源规格参考采购单价，人民币。';
 comment on column sku_mgmt.product_sku_source.reference_weight_g is '该货源规格参考重量，单位克。';
@@ -337,14 +424,17 @@ comment on column sku_mgmt.product_sku_source.note is '货源备注。';
 comment on column sku_mgmt.product_sku_source.created_at is '创建时间，Asia/Shanghai本地时间。';
 comment on column sku_mgmt.product_sku_source.updated_at is '更新时间，Asia/Shanghai本地时间。';
 
-comment on table sku_mgmt.bundle_sku is '组合SKU主表，表示由多个商品SKU或多个数量商品SKU组成的销售组合。';
+comment on table sku_mgmt.bundle_sku is '组合SKU主表，表示由不超过3个商品SKU组成的销售组合；数量已进入商品SKU身份。';
 comment on column sku_mgmt.bundle_sku.bundle_sku is '系统生成的组合SKU编码，格式为ZH_YYMMDD_日流水。';
 comment on column sku_mgmt.bundle_sku.bundle_name is '组合SKU名称，由明细规格和数量生成。';
-comment on column sku_mgmt.bundle_sku.detail_fingerprint is '组合明细指纹，用于识别相同商品SKU和数量构成的组合。';
+comment on column sku_mgmt.bundle_sku.detail_fingerprint is '组合明细指纹，用于识别相同商品SKU组合；目标口径下明细数量均为1。';
 comment on column sku_mgmt.bundle_sku.bundle_type is '组合类型，预留区分单品多件或多品组合。';
 comment on column sku_mgmt.bundle_sku.total_product_count is '组合内商品总件数。';
 comment on column sku_mgmt.bundle_sku.distinct_product_sku_count is '组合内不同商品SKU数量。';
 comment on column sku_mgmt.bundle_sku.main_image_url is '组合SKU主图链接。';
+comment on column sku_mgmt.bundle_sku.length_cm is '组合SKU销售包装长，单位厘米。';
+comment on column sku_mgmt.bundle_sku.width_cm is '组合SKU销售包装宽，单位厘米。';
+comment on column sku_mgmt.bundle_sku.height_cm is '组合SKU销售包装高，单位厘米。';
 comment on column sku_mgmt.bundle_sku.chinese_customs_name is '中文报关名。';
 comment on column sku_mgmt.bundle_sku.logistics_attribute is '产品属性，来自平台SKU输入属性字段，如普货、带电、敏感。';
 comment on column sku_mgmt.bundle_sku.reference_total_purchase_price_rmb is '组合参考采购总价，人民币。';
@@ -357,7 +447,7 @@ comment on table sku_mgmt.bundle_sku_item is '组合SKU明细表，记录组合S
 comment on column sku_mgmt.bundle_sku_item.id is '自增主键。';
 comment on column sku_mgmt.bundle_sku_item.bundle_sku is '组合SKU编码。';
 comment on column sku_mgmt.bundle_sku_item.product_sku is '组合内商品SKU编码。';
-comment on column sku_mgmt.bundle_sku_item.quantity is '该商品SKU在组合内的数量。';
+comment on column sku_mgmt.bundle_sku_item.quantity is '该商品SKU在组合内的数量，目标口径下固定为1。';
 comment on column sku_mgmt.bundle_sku_item.source_detail_key is '来源明细键，用于追溯输入规格明细。';
 comment on column sku_mgmt.bundle_sku_item.created_at is '创建时间，Asia/Shanghai本地时间。';
 comment on column sku_mgmt.bundle_sku_item.updated_at is '更新时间，Asia/Shanghai本地时间。';
@@ -434,7 +524,7 @@ comment on column sku_mgmt.product_sku_variant_merge_log.note is '合并日志�
 
 comment on table sku_mgmt.process_batch is '处理批次表，记录一次平台补充或后续工作流运行的汇总状态。';
 comment on column sku_mgmt.process_batch.process_batch_id is '处理批次ID。';
-comment on column sku_mgmt.process_batch.workflow_type is '工作流类型，第一版为platform_listing_supplement。';
+comment on column sku_mgmt.process_batch.workflow_type is '工作流类型，platform_listing_supplement普通补充，platform_listing_update显式映射更新。';
 comment on column sku_mgmt.process_batch.input_file is '本次处理输入文件路径。';
 comment on column sku_mgmt.process_batch.status is '批次状态，running、success、partial_success或failed。';
 comment on column sku_mgmt.process_batch.input_rows is '输入总行数。';

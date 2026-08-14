@@ -13,7 +13,7 @@ from ..constants import (
 )
 from ..models.domain_models import CleanedSourceUrl
 
-OFFER_ID_PATTERN = re.compile(r"/offer/(\d+)\.(?:html|htm)$", re.IGNORECASE)
+OFFER_ID_PATTERN = re.compile(r"/offer/(\d+)\.(?:html|htm)(?:$|[/?#&])", re.IGNORECASE)
 
 
 def clean_source_url(raw_url: object) -> CleanedSourceUrl:

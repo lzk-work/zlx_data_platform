@@ -13,7 +13,19 @@ def test_export_bundle_sku_template_writes_sales_unit_dimensions(tmp_path) -> No
     output_path = tmp_path / "bundle.xlsx"
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(["*组合sku", "包含的商品sku", "数量", "长（cm）", "宽（cm）", "高（cm）", "危险运输品"])
+    sheet.append(
+        [
+            "*组合sku",
+            "包含的商品sku",
+            "数量",
+            "申报重量(g)",
+            "长（cm）",
+            "宽（cm）",
+            "高（cm）",
+            "申报金额（USD）",
+            "危险运输品",
+        ]
+    )
     workbook.save(template_path)
 
     export_bundle_sku_template(
@@ -29,22 +41,28 @@ def test_export_bundle_sku_template_writes_sales_unit_dimensions(tmp_path) -> No
                 main_image_url="https://example.com/a.jpg",
                 chinese_customs_name="玩具",
                 reference_total_purchase_price_rmb=Decimal("20"),
-                reference_total_weight_g=Decimal("300"),
+                reference_total_weight_g=Decimal("300.235"),
                 logistics_attribute="带电",
                 note="",
-                length_cm=Decimal("10"),
-                width_cm=Decimal("8"),
-                height_cm=Decimal("3"),
+                length_cm=Decimal("10.235"),
+                width_cm=Decimal("8.234"),
+                height_cm=Decimal("3.235"),
             )
         ],
-        exchange_rate_usd=7,
+        exchange_rate_usd=6.8,
     )
 
     saved = load_workbook(output_path, data_only=True)
     row = [cell.value for cell in saved.active[2]]
     saved.close()
 
-    assert row == ["ZH_260731_1_2_1", "YS_260731_1", 2, Decimal("10"), Decimal("8"), Decimal("3"), "1"]
+    assert row[:3] == ["ZH_260731_1_2_1", "YS_260731_1", 2]
+    assert Decimal(str(row[3])) == Decimal("300.24")
+    assert Decimal(str(row[4])) == Decimal("10.24")
+    assert Decimal(str(row[5])) == Decimal("8.23")
+    assert Decimal(str(row[6])) == Decimal("3.24")
+    assert Decimal(str(row[7])) == Decimal("2.94")
+    assert row[8] == "1"
 
 
 def test_export_bundle_sku_template_repeats_bundle_sku_for_each_item_row(tmp_path) -> None:

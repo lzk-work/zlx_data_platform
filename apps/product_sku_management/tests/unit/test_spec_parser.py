@@ -41,6 +41,20 @@ def test_parse_spec_supports_inner_parentheses_inside_outer_groups() -> None:
     assert [detail.quantity for detail in details] == [2, 2, 2]
 
 
+def test_parse_spec_allows_whitespace_between_outer_groups() -> None:
+    details = parse_spec(
+        "（红色||60*60cm||2）（洋红||60*60cm||2）（粉红||60*60cm||2） "
+        "（橙色||60*60cm||2）（黄色||60*60cm||2）\n（绿色||60*60cm||2）"
+        "（军绿||60*60cm||2）（天蓝||60*60cm||2）（孔蓝||60*60cm||2）"
+        "（宝蓝||60*60cm||2）（深紫||60*60cm||2）（浅紫||60*60cm||2）"
+    )
+
+    assert len(details) == 12
+    assert details[0].spec == "红色||60*60cm"
+    assert details[-1].spec == "浅紫||60*60cm"
+    assert {detail.quantity for detail in details} == {2}
+
+
 def test_parse_spec_keeps_parentheses_inside_normal_spec_text() -> None:
     (detail,) = parse_spec("XL码（9-13岁）建议脚长20-25cm||5")
 

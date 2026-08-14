@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
@@ -17,12 +19,18 @@ from ..constants import (
     EXPORT_ACTION_UPDATE,
     MAPPING_TARGET_BUNDLE_SKU,
     MAPPING_TARGET_PRODUCT_SKU,
+    PRODUCT_SKU_TYPE_FORCED_PACKAGE,
+    PRODUCT_SKU_TYPE_NORMAL,
+    SALES_UNIT_TYPE_FORCED_PRODUCT_SKU,
+    WORKFLOW_MODE_SUPPLEMENT,
+    WORKFLOW_MODE_UPDATE,
     WORKFLOW_PLATFORM_LISTING_SUPPLEMENT,
+    WORKFLOW_PLATFORM_LISTING_UPDATE,
 )
 from ..domain.bundle_service import bundle_fingerprint, decide_bundle
 from ..domain.dianxiaomi_export_planner import bundle_sku_plan, platform_pair_plan, product_sku_plan
 from ..domain.logistics_attribute import dianxiaomi_dangerous_transport_code
-from ..domain.name_builder import build_bundle_name, build_product_name
+from ..domain.name_builder import build_bundle_name, build_forced_package_name, build_product_name
 from ..domain.pricing_weight_calculator import calculate_reference_value, kg_to_g
 from ..domain.source_cleaner import clean_source_url
 from ..domain.spec_parser import ParsedSpecDetail, parse_spec
@@ -59,10 +67,12 @@ class DryRunContext:
         self.date_key = date_key
         self.product_counter = product_counter
         self.bundle_counter = bundle_counter
-        self.products_by_source: dict[tuple[str, str], ProductSkuRecord] = {}
+        self.products_by_source: dict[tuple[str, str, int], ProductSkuRecord] = {}
+        self.forced_packages_by_fingerprint: dict[str, ProductSkuRecord] = {}
         self.bundles_by_fingerprint: dict[str, BundleSkuRecord] = {}
         self.platform_mapping_by_sku: dict[str, tuple[str, str]] = {}
         self.platform_skus_by_target: dict[str, set[str]] = {}
+        self.removed_platform_skus_by_target: dict[str, set[str]] = {}
         self.sales_unit_keys: set[tuple[str, str, str]] = set()
         self.category_code_by_name: dict[str, str | None] = {}
 
@@ -131,6 +141,28 @@ class DryRunContext:
         self.platform_skus_by_target.setdefault(mapping_target_sku, set()).add(platform_sku)
         return existing is None
 
+    def remember_platform_rebind(
+        self,
+        platform_sku: str,
+        old_mapping_target_sku: str,
+        mapping_target_type: str,
+        mapping_target_sku: str,
+    ) -> None:
+        """记录试运行中的平台SKU改绑预测。
+
+        Args:
+            platform_sku: 平台SKU。
+            old_mapping_target_sku: 数据库当前旧映射目标SKU。
+            mapping_target_type: 新映射目标类型。
+            mapping_target_sku: 新映射目标SKU。
+
+        Returns:
+            None: 在内存中记录旧目标移除和新目标新增。
+        """
+        self.platform_mapping_by_sku[platform_sku] = (mapping_target_type, mapping_target_sku)
+        self.removed_platform_skus_by_target.setdefault(old_mapping_target_sku, set()).add(platform_sku)
+        self.platform_skus_by_target.setdefault(mapping_target_sku, set()).add(platform_sku)
+
     def remember_sales_unit(self, platform_sku: str, mapping_target_type: str, mapping_target_sku: str) -> bool:
         """记录本次试运行预测的销售单元。
 
@@ -172,6 +204,7 @@ def run_platform_listing_supplement(
     *,
     init_db: bool = False,
     dry_run: bool = False,
+    mode: str = WORKFLOW_MODE_SUPPLEMENT,
 ) -> BatchSummary:
     """运行平台SKU补充工作流。
 
@@ -179,6 +212,7 @@ def run_platform_listing_supplement(
         settings: 商品SKU管理运行配置。
         init_db: 是否先执行建表SQL。
         dry_run: 是否只生成预期结果，不写入数据库。
+        mode: 运行模式，supplement为普通补充，update允许平台SKU显式改绑。
 
     Returns:
         BatchSummary: 本批次输入、成功、异常、新建对象和输出目录汇总。
@@ -187,13 +221,15 @@ def run_platform_listing_supplement(
     if init_db:
         db.ensure_schema(settings.sql_path)
 
+    workflow_type = WORKFLOW_PLATFORM_LISTING_UPDATE if mode == WORKFLOW_MODE_UPDATE else WORKFLOW_PLATFORM_LISTING_SUPPLEMENT
+    input_file = platform_listing_file_for_mode(settings, mode)
     process_batch_id = new_process_batch_id("sku_mgmt_dry_run" if dry_run else "sku_mgmt")
     output_dir = settings.output_dir / process_batch_id
     output_dir.mkdir(parents=True, exist_ok=True)
     if not dry_run:
-        db.create_process_batch(process_batch_id, str(settings.platform_listing_file), str(output_dir))
+        db.create_process_batch(process_batch_id, str(input_file), str(output_dir), workflow_type)
 
-    input_rows = read_platform_listing_rows(settings.platform_listing_file)
+    input_rows = read_platform_listing_rows(input_file)
     dry_run_context: DryRunContext | None = None
     dry_run_conn: Any | None = None
     dry_run_connection_manager: Any | None = None
@@ -206,6 +242,7 @@ def run_platform_listing_supplement(
     sales_units: list[SalesUnitResult] = []
     row_logs: list[RowLog] = []
     exceptions: list[ExceptionRecord] = []
+    affected_mapping_target_skus: set[str] = set()
 
     created_product_sku_count = 0
     created_bundle_sku_count = 0
@@ -217,9 +254,21 @@ def run_platform_listing_supplement(
             if dry_run:
                 if dry_run_context is None or dry_run_conn is None:
                     raise RuntimeError("试运行上下文未初始化")
-                result = process_one_row_dry_run(db, dry_run_conn, dry_run_context, process_batch_id, input_row)
+                result = process_one_row_dry_run(
+                    db,
+                    dry_run_conn,
+                    dry_run_context,
+                    process_batch_id,
+                    input_row,
+                    allow_mapping_rebind=mode == WORKFLOW_MODE_UPDATE,
+                )
             else:
-                result = process_one_row(db, process_batch_id, input_row)
+                result = process_one_row(
+                    db,
+                    process_batch_id,
+                    input_row,
+                    allow_mapping_rebind=mode == WORKFLOW_MODE_UPDATE,
+                )
         except Exception as exc:  # noqa: BLE001 - row-level exception must not stop the batch.
             exception = ExceptionRecord(
                 row_no=input_row.row_no,
@@ -238,8 +287,8 @@ def run_platform_listing_supplement(
             )
             row_logs.append(row_log)
             if not dry_run:
-                db.insert_exception_record(process_batch_id, exception)
-                db.insert_row_log(process_batch_id, row_log)
+                db.insert_exception_record(process_batch_id, exception, workflow_type)
+                db.insert_row_log(process_batch_id, row_log, workflow_type)
             continue
 
         touched_products.extend(result.product_records)
@@ -248,7 +297,8 @@ def run_platform_listing_supplement(
         sales_units.append(result.sales_unit_result)
         row_logs.append(result.row_log)
         if not dry_run:
-            db.insert_row_log(process_batch_id, result.row_log)
+            db.insert_row_log(process_batch_id, result.row_log, workflow_type)
+        affected_mapping_target_skus.update(result.affected_mapping_target_skus)
         created_product_sku_count += sum(1 for record in result.product_records if record.created)
         created_bundle_sku_count += int(bool(result.bundle_record and result.bundle_record.created))
         created_sales_unit_count += int(result.created_sales_unit)
@@ -256,8 +306,8 @@ def run_platform_listing_supplement(
 
     summary = BatchSummary(
         process_batch_id=process_batch_id,
-        workflow_type=WORKFLOW_PLATFORM_LISTING_SUPPLEMENT,
-        input_file=str(settings.platform_listing_file),
+        workflow_type=workflow_type,
+        input_file=str(input_file),
         output_dir=str(output_dir),
         input_rows=len(input_rows),
         success_rows=len(sales_units),
@@ -277,6 +327,8 @@ def run_platform_listing_supplement(
         output_dir=output_dir,
         exchange_rate_usd=settings.exchange_rate_usd,
         additional_platform_skus_by_target=dry_run_context.platform_skus_by_target if dry_run_context else None,
+        removed_platform_skus_by_target=dry_run_context.removed_platform_skus_by_target if dry_run_context else None,
+        additional_mapping_target_skus=affected_mapping_target_skus,
     )
 
     if not dry_run:
@@ -314,6 +366,8 @@ def build_dianxiaomi_export_plans(
     output_dir: Path,
     exchange_rate_usd: float,
     additional_platform_skus_by_target: dict[str, set[str]] | None = None,
+    removed_platform_skus_by_target: dict[str, set[str]] | None = None,
+    additional_mapping_target_skus: set[str] | None = None,
 ) -> DianxiaomiExportResult:
     """生成店小秘导出计划和实际导出记录。
 
@@ -326,6 +380,8 @@ def build_dianxiaomi_export_plans(
         output_dir: 本批次输出目录。
         exchange_rate_usd: 人民币换美元汇率。
         additional_platform_skus_by_target: 试运行中预测新增但尚未入库的平台SKU映射。
+        removed_platform_skus_by_target: 试运行中预测从旧目标移除的平台SKU映射。
+        additional_mapping_target_skus: 本批次除销售单元新目标外还需重算配对的目标SKU。
 
     Returns:
         DianxiaomiExportResult: 全部导出计划，以及按新增/更新拆分后的模板记录。
@@ -336,10 +392,17 @@ def build_dianxiaomi_export_plans(
     platform_pair_exports_by_action: dict[str, list[PlatformPairExportRecord]] = empty_export_buckets()
 
     for record in unique_product_records(product_records):
+        previous_hash = db.get_dianxiaomi_confirmed_hash(DIANXIAOMI_OBJECT_PRODUCT_SKU, record.product_sku)
         plan = product_sku_plan(
             process_batch_id=process_batch_id,
             record=record,
-            previous_hash=db.get_dianxiaomi_confirmed_hash(DIANXIAOMI_OBJECT_PRODUCT_SKU, record.product_sku),
+            previous_hash=previous_hash,
+            previous_payload_json=db.get_dianxiaomi_confirmed_payload(
+                DIANXIAOMI_OBJECT_PRODUCT_SKU,
+                record.product_sku,
+            )
+            if previous_hash
+            else None,
             export_file=str(dianxiaomi_template_path(output_dir, "product_sku", EXPORT_ACTION_CREATE)),
             exchange_rate_usd=exchange_rate_usd,
         )
@@ -349,10 +412,17 @@ def build_dianxiaomi_export_plans(
             product_exports_by_action[plan.action_type].append(record)
 
     for record in unique_bundle_records(bundle_records):
+        previous_hash = db.get_dianxiaomi_confirmed_hash(DIANXIAOMI_OBJECT_BUNDLE_SKU, record.bundle_sku)
         plan = bundle_sku_plan(
             process_batch_id=process_batch_id,
             record=record,
-            previous_hash=db.get_dianxiaomi_confirmed_hash(DIANXIAOMI_OBJECT_BUNDLE_SKU, record.bundle_sku),
+            previous_hash=previous_hash,
+            previous_payload_json=db.get_dianxiaomi_confirmed_payload(
+                DIANXIAOMI_OBJECT_BUNDLE_SKU,
+                record.bundle_sku,
+            )
+            if previous_hash
+            else None,
             export_file=str(dianxiaomi_template_path(output_dir, "bundle_sku", EXPORT_ACTION_CREATE)),
             exchange_rate_usd=exchange_rate_usd,
         )
@@ -362,11 +432,15 @@ def build_dianxiaomi_export_plans(
             bundle_exports_by_action[plan.action_type].append(record)
 
     additional_platform_skus_by_target = additional_platform_skus_by_target or {}
-    for mapping_target_sku in sorted({result.mapping_target_sku for result in sales_units}):
-        record = platform_pair_record_with_additions(
+    removed_platform_skus_by_target = removed_platform_skus_by_target or {}
+    additional_mapping_target_skus = additional_mapping_target_skus or set()
+    mapping_target_skus = {result.mapping_target_sku for result in sales_units} | additional_mapping_target_skus
+    for mapping_target_sku in sorted(mapping_target_skus):
+        record = platform_pair_record_with_changes(
             db,
             mapping_target_sku,
             additional_platform_skus_by_target.get(mapping_target_sku, set()),
+            removed_platform_skus_by_target.get(mapping_target_sku, set()),
         )
         plan = platform_pair_plan(
             process_batch_id=process_batch_id,
@@ -397,6 +471,21 @@ class DianxiaomiExportResult:
     platform_pair_exports_by_action: dict[str, list[PlatformPairExportRecord]]
 
 
+def platform_listing_file_for_mode(settings: ProductSkuSettings, mode: str) -> Path:
+    """按运行模式选择输入文件。
+
+    Args:
+        settings: 商品SKU管理运行配置。
+        mode: 运行模式，supplement或update。
+
+    Returns:
+        Path: 当前模式对应的输入Excel路径。
+    """
+    if mode == WORKFLOW_MODE_UPDATE:
+        return settings.platform_listing_update_file
+    return settings.platform_listing_supplement_file
+
+
 def export_dianxiaomi_templates(
     settings: ProductSkuSettings,
     output_dir: Path,
@@ -413,23 +502,31 @@ def export_dianxiaomi_templates(
         None: 写入商品SKU、组合SKU、平台SKU配对的新增/更新模板。
     """
     for action_type in export_action_types():
-        export_product_sku_template(
-            settings.product_sku_template,
-            dianxiaomi_template_path(output_dir, "product_sku", action_type),
-            export_result.product_exports_by_action[action_type],
-            exchange_rate_usd=settings.exchange_rate_usd,
-        )
-        export_bundle_sku_template(
-            settings.bundle_sku_template,
-            dianxiaomi_template_path(output_dir, "bundle_sku", action_type),
-            export_result.bundle_exports_by_action[action_type],
-            exchange_rate_usd=settings.exchange_rate_usd,
-        )
-        export_platform_pair_template(
-            settings.platform_pair_template,
-            dianxiaomi_template_path(output_dir, "platform_pair", action_type),
-            export_result.platform_pair_exports_by_action[action_type],
-        )
+        product_records = export_result.product_exports_by_action[action_type]
+        if product_records:
+            export_product_sku_template(
+                settings.product_sku_template,
+                dianxiaomi_template_path(output_dir, "product_sku", action_type),
+                product_records,
+                exchange_rate_usd=settings.exchange_rate_usd,
+            )
+
+        bundle_records = export_result.bundle_exports_by_action[action_type]
+        if bundle_records:
+            export_bundle_sku_template(
+                settings.bundle_sku_template,
+                dianxiaomi_template_path(output_dir, "bundle_sku", action_type),
+                bundle_records,
+                exchange_rate_usd=settings.exchange_rate_usd,
+            )
+
+        platform_pair_records = export_result.platform_pair_exports_by_action[action_type]
+        if platform_pair_records:
+            export_platform_pair_template(
+                settings.platform_pair_template,
+                dianxiaomi_template_path(output_dir, "platform_pair", action_type),
+                platform_pair_records,
+            )
 
 
 def empty_export_buckets() -> dict[str, list[Any]]:
@@ -490,23 +587,25 @@ def plan_with_action_export_file(
     return replace(plan, export_file=str(dianxiaomi_template_path(output_dir, object_name, plan.action_type)))
 
 
-def platform_pair_record_with_additions(
+def platform_pair_record_with_changes(
     db: ProductSkuDatabase,
     mapping_target_sku: str,
     additional_platform_skus: set[str],
+    removed_platform_skus: set[str],
 ) -> PlatformPairExportRecord:
-    """读取平台SKU配对记录并合并试运行预测映射。
+    """读取平台SKU配对记录并合并试运行预测的新增和移除映射。
 
     Args:
         db: 商品SKU数据库仓储。
         mapping_target_sku: 商品SKU或组合SKU编码。
         additional_platform_skus: 试运行预测新增的平台SKU集合。
+        removed_platform_skus: 试运行预测从当前目标移除的平台SKU集合。
 
     Returns:
-        PlatformPairExportRecord: 数据库已有平台SKU和试运行新增平台SKU的完整集合。
+        PlatformPairExportRecord: 数据库已有平台SKU叠加试运行变化后的完整集合。
     """
     record = db.get_platform_pair_export_record(mapping_target_sku)
-    platform_skus = tuple(sorted(set(record.platform_skus) | additional_platform_skus))
+    platform_skus = tuple(sorted((set(record.platform_skus) | additional_platform_skus) - removed_platform_skus))
     return PlatformPairExportRecord(mapping_target_sku=mapping_target_sku, platform_skus=platform_skus)
 
 
@@ -572,6 +671,7 @@ class RowProcessResult:
         row_log: RowLog,
         created_sales_unit: bool,
         created_mapping: bool,
+        affected_mapping_target_skus: tuple[str, ...] = (),
     ) -> None:
         """初始化单行处理结果。
 
@@ -582,6 +682,7 @@ class RowProcessResult:
             row_log: 本行处理日志。
             created_sales_unit: 是否新建销售单元。
             created_mapping: 是否新建或更新平台SKU映射。
+            affected_mapping_target_skus: 本行需要重新计算平台配对的目标SKU集合。
 
         Returns:
             None: 属性写入当前对象。
@@ -592,12 +693,15 @@ class RowProcessResult:
         self.row_log = row_log
         self.created_sales_unit = created_sales_unit
         self.created_mapping = created_mapping
+        self.affected_mapping_target_skus = affected_mapping_target_skus
 
 
 def process_one_row(
     db: ProductSkuDatabase,
     process_batch_id: str,
     input_row: PlatformListingInputRow,
+    *,
+    allow_mapping_rebind: bool = False,
 ) -> RowProcessResult:
     """校验并处理单行平台SKU补充输入。
 
@@ -605,6 +709,7 @@ def process_one_row(
         db: 商品SKU数据库仓储。
         process_batch_id: 当前处理批次ID。
         input_row: 已解析的Excel输入行。
+        allow_mapping_rebind: 是否允许平台SKU从旧目标改绑到本行新目标。
 
     Returns:
         RowProcessResult: 本行涉及的商品SKU、组合SKU、销售单元、日志和创建标记。
@@ -625,35 +730,96 @@ def process_one_row(
     with db.transaction() as conn:
         product_records: list[ProductSkuRecord] = []
         product_items: list[tuple[str, int]] = []
+        sales_unit_note = input_row.development_note
 
-        for item, detail in zip(parsed_items, parsed_details, strict=True):
-            product_name = build_product_name(detail.display_spec_params, detail.quantity)
-            existing = db.find_product_sku_by_source(conn, item.source_url, item.spec)
+        if decision.sales_unit_type == SALES_UNIT_TYPE_FORCED_PRODUCT_SKU:
+            package_details = package_details_from_items(parsed_items, parsed_details)
+            package_fingerprint = package_fingerprint_from_details(package_details)
+            product_name = build_forced_package_name(tuple(parsed_details))
+            note = forced_package_note(input_row.development_note, package_details)
+            sales_unit_note = note
+            existing = db.find_forced_package_product_sku(conn, package_fingerprint)
             if existing:
                 existing = db.update_product_sku_latest_fields(
                     conn,
                     product_sku=str(existing["product_sku"]),
                     logistics_attribute=input_row.logistics_attribute,
+                    reference_purchase_price_rmb=total_purchase_price_rmb,
+                    reference_weight_g=total_weight_g,
+                    chinese_customs_name=input_row.chinese_customs_name,
+                    note=note,
+                    length_cm=input_row.length_cm,
+                    width_cm=input_row.width_cm,
+                    height_cm=input_row.height_cm,
+                    is_direct_sales_unit=True,
                 )
-                product_record = product_record_from_row(existing, item, product_name, created=False)
+                product_record = product_record_from_row(existing, None, product_name, created=False)
                 product_record = replace(
                     product_record,
                     main_image_url=input_row.main_image_url,
                     chinese_customs_name=product_record.chinese_customs_name or input_row.chinese_customs_name,
                 )
             else:
-                product_record = db.create_product_sku(
+                product_record = db.create_forced_package_product_sku(
                     conn,
-                    item=item,
+                    package_fingerprint=package_fingerprint,
+                    package_details=package_details,
                     category_code=category_code,
                     first_level_category=input_row.first_level_category,
                     main_image_url=input_row.main_image_url,
                     chinese_customs_name=input_row.chinese_customs_name,
                     logistics_attribute=input_row.logistics_attribute,
                     product_name=product_name,
+                    total_purchase_price_rmb=total_purchase_price_rmb,
+                    total_weight_g=total_weight_g,
+                    note=note,
+                    length_cm=input_row.length_cm,
+                    width_cm=input_row.width_cm,
+                    height_cm=input_row.height_cm,
                 )
             product_records.append(product_record)
-            product_items.append((product_record.product_sku, item.quantity))
+            product_items.append((product_record.product_sku, 1))
+        else:
+            for item, detail in zip(parsed_items, parsed_details, strict=True):
+                product_name = build_product_name(detail.display_spec_params, detail.quantity)
+                existing = db.find_product_sku_by_source(conn, item.source_url, item.spec, item.quantity)
+                if existing:
+                    existing = db.update_product_sku_latest_fields(
+                        conn,
+                        product_sku=str(existing["product_sku"]),
+                        logistics_attribute=input_row.logistics_attribute,
+                        reference_purchase_price_rmb=item.reference_purchase_price_rmb,
+                        reference_weight_g=item.reference_weight_g,
+                        chinese_customs_name=input_row.chinese_customs_name,
+                        note=item.source_note,
+                        length_cm=input_row.length_cm,
+                        width_cm=input_row.width_cm,
+                        height_cm=input_row.height_cm,
+                        is_direct_sales_unit=not decision.needs_bundle,
+                    )
+                    product_record = product_record_from_row(existing, item, product_name, created=False)
+                    product_record = replace(
+                        product_record,
+                        main_image_url=input_row.main_image_url,
+                        chinese_customs_name=product_record.chinese_customs_name or input_row.chinese_customs_name,
+                    )
+                else:
+                    product_record = db.create_product_sku(
+                        conn,
+                        item=item,
+                        category_code=category_code,
+                        first_level_category=input_row.first_level_category,
+                        main_image_url=input_row.main_image_url,
+                        chinese_customs_name=input_row.chinese_customs_name,
+                        logistics_attribute=input_row.logistics_attribute,
+                        product_name=product_name,
+                        length_cm=input_row.length_cm if not decision.needs_bundle else None,
+                        width_cm=input_row.width_cm if not decision.needs_bundle else None,
+                        height_cm=input_row.height_cm if not decision.needs_bundle else None,
+                        is_direct_sales_unit=not decision.needs_bundle,
+                    )
+                product_records.append(product_record)
+                product_items.append((product_record.product_sku, 1))
 
         bundle_record: BundleSkuRecord | None = None
         if decision.needs_bundle:
@@ -665,6 +831,13 @@ def process_one_row(
                     conn,
                     bundle_sku=str(existing_bundle["bundle_sku"]),
                     logistics_attribute=input_row.logistics_attribute,
+                    reference_total_purchase_price_rmb=total_purchase_price_rmb,
+                    reference_total_weight_g=total_weight_g,
+                    chinese_customs_name=input_row.chinese_customs_name,
+                    note=input_row.development_note,
+                    length_cm=input_row.length_cm,
+                    width_cm=input_row.width_cm,
+                    height_cm=input_row.height_cm,
                 )
                 bundle_record = bundle_record_from_row(
                     existing_bundle,
@@ -684,6 +857,9 @@ def process_one_row(
                     logistics_attribute=input_row.logistics_attribute,
                     note=input_row.development_note,
                     source_urls=bundle_source_urls,
+                    length_cm=input_row.length_cm,
+                    width_cm=input_row.width_cm,
+                    height_cm=input_row.height_cm,
                 )
             bundle_record = replace(
                 bundle_record,
@@ -697,7 +873,7 @@ def process_one_row(
         else:
             mapping_target_type = MAPPING_TARGET_PRODUCT_SKU
             mapping_target_sku = product_records[0].product_sku
-            branch_name = "product_sku"
+            branch_name = "forced_product_sku" if decision.sales_unit_type == SALES_UNIT_TYPE_FORCED_PRODUCT_SKU else "product_sku"
 
         sales_unit_id, created_sales_unit = db.create_sales_unit(
             conn,
@@ -715,9 +891,17 @@ def process_one_row(
             logistics_attribute=input_row.logistics_attribute,
             chinese_customs_name=input_row.chinese_customs_name,
             first_level_category=input_row.first_level_category,
-            development_note=input_row.development_note,
+            development_note=sales_unit_note,
             process_batch_id=process_batch_id,
         )
+        affected_mapping_target_skus = {mapping_target_sku}
+        existing_mapping = db.find_platform_mapping(conn, input_row.platform_sku)
+        if existing_mapping:
+            existing_target = str(existing_mapping["mapping_target_sku"])
+            existing_type = str(existing_mapping["mapping_target_type"])
+            if existing_type != mapping_target_type or existing_target != mapping_target_sku:
+                affected_mapping_target_skus.add(existing_target)
+
         created_mapping = db.upsert_platform_mapping(
             conn,
             platform_sku=input_row.platform_sku,
@@ -725,7 +909,8 @@ def process_one_row(
             sales_unit_id=sales_unit_id,
             mapping_target_type=mapping_target_type,
             mapping_target_sku=mapping_target_sku,
-            note=input_row.development_note,
+            note=sales_unit_note,
+            allow_rebind=allow_mapping_rebind,
         )
         db.insert_mapping_snapshot(
             conn,
@@ -757,7 +942,7 @@ def process_one_row(
         bundle_sku=sales_unit_result.bundle_sku,
         branch_name=branch_name,
         result="success",
-        message="处理成功",
+        message="更新模式处理成功" if allow_mapping_rebind else "处理成功",
     )
     return RowProcessResult(
         product_records=product_records,
@@ -766,6 +951,7 @@ def process_one_row(
         row_log=row_log,
         created_sales_unit=created_sales_unit,
         created_mapping=created_mapping,
+        affected_mapping_target_skus=tuple(sorted(affected_mapping_target_skus)),
     )
 
 
@@ -775,6 +961,8 @@ def process_one_row_dry_run(
     context: DryRunContext,
     process_batch_id: str,
     input_row: PlatformListingInputRow,
+    *,
+    allow_mapping_rebind: bool = False,
 ) -> RowProcessResult:
     """试运行处理单行输入，不写入数据库。
 
@@ -784,6 +972,7 @@ def process_one_row_dry_run(
         context: 试运行上下文。
         process_batch_id: 当前试运行批次ID。
         input_row: 已解析的Excel输入行。
+        allow_mapping_rebind: 是否允许平台SKU从旧目标改绑到本行新目标。
 
     Returns:
         RowProcessResult: 本行预期商品SKU、组合SKU、销售单元、日志和创建标记。
@@ -804,43 +993,124 @@ def process_one_row_dry_run(
     product_records: list[ProductSkuRecord] = []
     product_items: list[tuple[str, int]] = []
 
-    for item, detail in zip(parsed_items, parsed_details, strict=True):
-        product_name = build_product_name(detail.display_spec_params, detail.quantity)
-        product_key = (item.source_url, item.spec)
-        product_record = context.products_by_source.get(product_key)
+    if decision.sales_unit_type == SALES_UNIT_TYPE_FORCED_PRODUCT_SKU:
+        package_details = package_details_from_items(parsed_items, parsed_details)
+        package_fingerprint = package_fingerprint_from_details(package_details)
+        product_name = build_forced_package_name(tuple(parsed_details))
+        note = forced_package_note(input_row.development_note, package_details)
+        product_record = context.forced_packages_by_fingerprint.get(package_fingerprint)
         if product_record is not None:
-            product_record = replace(product_record, created=False)
+            product_record = replace(
+                product_record,
+                length_cm=input_row.length_cm,
+                width_cm=input_row.width_cm,
+                height_cm=input_row.height_cm,
+                is_direct_sales_unit=True,
+                note=note,
+                created=False,
+            )
         else:
-            existing = db.find_product_sku_by_source(conn, item.source_url, item.spec)
+            existing = db.find_forced_package_product_sku(conn, package_fingerprint)
             if existing:
-                product_record = product_record_from_row(existing, item, product_name, created=False)
+                product_record = product_record_from_row(existing, None, product_name, created=False)
                 product_record = replace(
                     product_record,
                     main_image_url=input_row.main_image_url,
                     chinese_customs_name=product_record.chinese_customs_name or input_row.chinese_customs_name,
                     logistics_attribute=input_row.logistics_attribute,
+                    length_cm=input_row.length_cm,
+                    width_cm=input_row.width_cm,
+                    height_cm=input_row.height_cm,
+                    is_direct_sales_unit=True,
+                    note=note,
                 )
             else:
+                primary_detail = package_details[0]
                 product_record = ProductSkuRecord(
                     product_sku=context.next_product_sku_code(category_code),
-                    source_url=item.source_url,
-                    source_platform=item.source_platform,
-                    spec=item.spec,
+                    source_url=str(primary_detail["source_url"]),
+                    source_platform=str(primary_detail["source_platform"]),
+                    spec=str(primary_detail["spec"]),
+                    quantity=1,
+                    product_sku_type=PRODUCT_SKU_TYPE_FORCED_PACKAGE,
+                    package_fingerprint=package_fingerprint,
+                    package_details=package_details,
                     product_name=product_name,
                     main_image_url=input_row.main_image_url,
                     first_level_category=input_row.first_level_category,
                     category_code=category_code,
-                    reference_purchase_price_rmb=item.reference_purchase_price_rmb,
-                    reference_weight_g=item.reference_weight_g,
+                    reference_purchase_price_rmb=total_purchase_price_rmb,
+                    reference_weight_g=total_weight_g,
                     chinese_customs_name=input_row.chinese_customs_name,
                     logistics_attribute=input_row.logistics_attribute,
-                    note=item.source_note,
+                    note=note,
+                    length_cm=input_row.length_cm,
+                    width_cm=input_row.width_cm,
+                    height_cm=input_row.height_cm,
+                    is_direct_sales_unit=True,
                     created=True,
                 )
-            context.products_by_source[product_key] = product_record
+            context.forced_packages_by_fingerprint[package_fingerprint] = product_record
 
         product_records.append(product_record)
-        product_items.append((product_record.product_sku, item.quantity))
+        product_items.append((product_record.product_sku, 1))
+    else:
+        for item, detail in zip(parsed_items, parsed_details, strict=True):
+            product_name = build_product_name(detail.display_spec_params, detail.quantity)
+            product_key = (item.source_url, item.spec, item.quantity)
+            product_record = context.products_by_source.get(product_key)
+            if product_record is not None:
+                product_record = replace(
+                    product_record,
+                    length_cm=input_row.length_cm if not decision.needs_bundle else product_record.length_cm,
+                    width_cm=input_row.width_cm if not decision.needs_bundle else product_record.width_cm,
+                    height_cm=input_row.height_cm if not decision.needs_bundle else product_record.height_cm,
+                    is_direct_sales_unit=product_record.is_direct_sales_unit or not decision.needs_bundle,
+                    created=False,
+                )
+            else:
+                existing = db.find_product_sku_by_source(conn, item.source_url, item.spec, item.quantity)
+                if existing:
+                    product_record = product_record_from_row(existing, item, product_name, created=False)
+                    product_record = replace(
+                        product_record,
+                        main_image_url=input_row.main_image_url,
+                        chinese_customs_name=product_record.chinese_customs_name or input_row.chinese_customs_name,
+                        logistics_attribute=input_row.logistics_attribute,
+                        length_cm=input_row.length_cm if not decision.needs_bundle else product_record.length_cm,
+                        width_cm=input_row.width_cm if not decision.needs_bundle else product_record.width_cm,
+                        height_cm=input_row.height_cm if not decision.needs_bundle else product_record.height_cm,
+                        is_direct_sales_unit=product_record.is_direct_sales_unit or not decision.needs_bundle,
+                    )
+                else:
+                    product_record = ProductSkuRecord(
+                        product_sku=context.next_product_sku_code(category_code),
+                        source_url=item.source_url,
+                        source_platform=item.source_platform,
+                        spec=item.spec,
+                        quantity=item.quantity,
+                        product_sku_type=PRODUCT_SKU_TYPE_NORMAL,
+                        package_fingerprint=None,
+                        package_details=(),
+                        product_name=product_name,
+                        main_image_url=input_row.main_image_url,
+                        first_level_category=input_row.first_level_category,
+                        category_code=category_code,
+                        reference_purchase_price_rmb=item.reference_purchase_price_rmb,
+                        reference_weight_g=item.reference_weight_g,
+                        chinese_customs_name=input_row.chinese_customs_name,
+                        logistics_attribute=input_row.logistics_attribute,
+                        note=item.source_note,
+                        length_cm=input_row.length_cm if not decision.needs_bundle else None,
+                        width_cm=input_row.width_cm if not decision.needs_bundle else None,
+                        height_cm=input_row.height_cm if not decision.needs_bundle else None,
+                        is_direct_sales_unit=not decision.needs_bundle,
+                        created=True,
+                    )
+                context.products_by_source[product_key] = product_record
+
+            product_records.append(product_record)
+            product_items.append((product_record.product_sku, 1))
 
     bundle_record: BundleSkuRecord | None = None
     if decision.needs_bundle:
@@ -891,7 +1161,11 @@ def process_one_row_dry_run(
     else:
         mapping_target_type = MAPPING_TARGET_PRODUCT_SKU
         mapping_target_sku = product_records[0].product_sku
-        branch_name = "product_sku_dry_run"
+        branch_name = (
+            "forced_product_sku_dry_run"
+            if decision.sales_unit_type == SALES_UNIT_TYPE_FORCED_PRODUCT_SKU
+            else "product_sku_dry_run"
+        )
 
     existing_sales_unit = db.find_sales_unit(
         conn,
@@ -906,12 +1180,23 @@ def process_one_row_dry_run(
     )
 
     existing_mapping = db.find_platform_mapping(conn, input_row.platform_sku)
+    affected_mapping_target_skus = {mapping_target_sku}
     if existing_mapping:
         existing_target = str(existing_mapping["mapping_target_sku"])
         existing_type = str(existing_mapping["mapping_target_type"])
         if existing_type != mapping_target_type or existing_target != mapping_target_sku:
-            raise ValueError("平台SKU已绑定不同映射目标")
-        created_mapping = False
+            if not allow_mapping_rebind:
+                raise ValueError("平台SKU已绑定不同映射目标")
+            affected_mapping_target_skus.add(existing_target)
+            context.remember_platform_rebind(
+                input_row.platform_sku,
+                existing_target,
+                mapping_target_type,
+                mapping_target_sku,
+            )
+            created_mapping = True
+        else:
+            created_mapping = False
     else:
         created_mapping = context.remember_platform_mapping(
             input_row.platform_sku,
@@ -939,7 +1224,7 @@ def process_one_row_dry_run(
         bundle_sku=sales_unit_result.bundle_sku,
         branch_name=branch_name,
         result="success",
-        message="试运行处理成功，未写入数据库",
+        message="更新模式试运行处理成功，未写入数据库" if allow_mapping_rebind else "试运行处理成功，未写入数据库",
     )
     return RowProcessResult(
         product_records=product_records,
@@ -948,6 +1233,7 @@ def process_one_row_dry_run(
         row_log=row_log,
         created_sales_unit=created_sales_unit,
         created_mapping=created_mapping,
+        affected_mapping_target_skus=tuple(sorted(affected_mapping_target_skus)),
     )
 
 
@@ -1090,3 +1376,74 @@ def unique_ordered_source_urls(source_urls: Iterable[str]) -> tuple[str, ...]:
         seen.add(source_url)
         result.append(source_url)
     return tuple(result)
+
+
+def package_details_from_items(
+    items: list[ParsedSourceItem],
+    details: list[ParsedSpecDetail],
+) -> tuple[dict[str, Any], ...]:
+    """构建强制合包商品SKU采购辨识明细。
+
+    Args:
+        items: 展开后的货源商品明细。
+        details: 规格解析明细。
+
+    Returns:
+        tuple[dict[str, Any], ...]: 可写入JSON的结构化明细。
+    """
+    package_details: list[dict[str, Any]] = []
+    for item, detail in zip(items, details, strict=True):
+        package_details.append(
+            {
+                "source_group_no": item.source_group_no,
+                "source_platform": item.source_platform,
+                "source_url": item.source_url,
+                "raw_spec": item.raw_spec,
+                "spec": item.spec,
+                "display_spec_params": list(detail.display_spec_params),
+                "quantity": item.quantity,
+                "source_note": item.source_note,
+            }
+        )
+    return tuple(package_details)
+
+
+def package_fingerprint_from_details(package_details: tuple[dict[str, Any], ...]) -> str:
+    """生成强制合包商品SKU结构化明细指纹。
+
+    Args:
+        package_details: 强制合包采购辨识明细。
+
+    Returns:
+        str: 排序后稳定序列化得到的SHA256指纹。
+    """
+    identity_tuples = sorted(
+        (
+            str(detail["source_url"]),
+            str(detail["spec"]),
+            int(detail["quantity"]),
+        )
+        for detail in package_details
+    )
+    identities = [
+        {"source_url": source_url, "spec": spec, "quantity": quantity}
+        for source_url, spec, quantity in identity_tuples
+    ]
+    text = json.dumps(identities, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def forced_package_note(development_note: str, package_details: tuple[dict[str, Any], ...]) -> str:
+    """生成强制合包商品SKU采购辨识备注。
+
+    Args:
+        development_note: 输入表开发备注。
+        package_details: 强制合包采购辨识明细。
+
+    Returns:
+        str: 合并原备注和强制合并标记后的备注文本。
+    """
+    forced_note = "强制合并"
+    if not development_note:
+        return forced_note
+    return f"{development_note}\n{forced_note}"

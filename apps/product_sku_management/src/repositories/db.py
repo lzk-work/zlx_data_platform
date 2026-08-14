@@ -15,6 +15,8 @@ from psycopg.types.json import Jsonb
 from connectors.database import PostgresClient, PostgresConfig
 
 from ..constants import (
+    PRODUCT_SKU_TYPE_FORCED_PACKAGE,
+    PRODUCT_SKU_TYPE_NORMAL,
     SCHEMA_NAME,
     SOURCE_STATUS_ACTIVE,
     WORKFLOW_PLATFORM_LISTING_SUPPLEMENT,
@@ -64,13 +66,20 @@ class ProductSkuDatabase(PostgresClient):
         """
         self.execute_sql_file(sql_path)
 
-    def create_process_batch(self, process_batch_id: str, input_file: str, output_dir: str) -> None:
+    def create_process_batch(
+        self,
+        process_batch_id: str,
+        input_file: str,
+        output_dir: str,
+        workflow_type: str = WORKFLOW_PLATFORM_LISTING_SUPPLEMENT,
+    ) -> None:
         """创建运行中的处理批次。
 
         Args:
             process_batch_id: 批次ID。
             input_file: 输入文件路径。
             output_dir: 输出目录路径。
+            workflow_type: 工作流类型。
 
         Returns:
             None: 写入process_batch初始记录。
@@ -81,7 +90,7 @@ class ProductSkuDatabase(PostgresClient):
                 process_batch_id, workflow_type, input_file, output_dir, status
             ) values (%s, %s, %s, %s, 'running')
             """,
-            (process_batch_id, WORKFLOW_PLATFORM_LISTING_SUPPLEMENT, input_file, output_dir),
+            (process_batch_id, workflow_type, input_file, output_dir),
         )
 
     def finish_process_batch(self, summary: BatchSummary, status: str) -> None:
@@ -124,12 +133,18 @@ class ProductSkuDatabase(PostgresClient):
             ),
         )
 
-    def insert_row_log(self, process_batch_id: str, log: RowLog) -> None:
+    def insert_row_log(
+        self,
+        process_batch_id: str,
+        log: RowLog,
+        workflow_type: str = WORKFLOW_PLATFORM_LISTING_SUPPLEMENT,
+    ) -> None:
         """写入单行处理日志。
 
         Args:
             process_batch_id: 批次ID。
             log: 单行处理日志。
+            workflow_type: 工作流类型。
 
         Returns:
             None: 写入process_row_log。
@@ -144,7 +159,7 @@ class ProductSkuDatabase(PostgresClient):
             """,
             (
                 process_batch_id,
-                WORKFLOW_PLATFORM_LISTING_SUPPLEMENT,
+                workflow_type,
                 log.row_no,
                 log.business_key,
                 log.sales_unit_type,
@@ -158,12 +173,18 @@ class ProductSkuDatabase(PostgresClient):
             ),
         )
 
-    def insert_exception_record(self, process_batch_id: str, exception: ExceptionRecord) -> None:
+    def insert_exception_record(
+        self,
+        process_batch_id: str,
+        exception: ExceptionRecord,
+        workflow_type: str = WORKFLOW_PLATFORM_LISTING_SUPPLEMENT,
+    ) -> None:
         """写入异常记录。
 
         Args:
             process_batch_id: 批次ID。
             exception: 行级异常记录。
+            workflow_type: 工作流类型。
 
         Returns:
             None: 写入exception_record。
@@ -177,7 +198,7 @@ class ProductSkuDatabase(PostgresClient):
             """,
             (
                 process_batch_id,
-                WORKFLOW_PLATFORM_LISTING_SUPPLEMENT,
+                workflow_type,
                 exception.row_no,
                 exception.business_key,
                 Jsonb(exception.raw_row),
@@ -233,13 +254,15 @@ class ProductSkuDatabase(PostgresClient):
         conn: Connection[Any],
         source_url: str,
         spec: str,
+        quantity: int,
     ) -> dict[str, Any] | None:
-        """按清洗链接和去数量规格查找商品SKU。
+        """按清洗链接、去数量规格和数量查找普通商品SKU。
 
         Args:
             conn: 当前事务连接。
             source_url: 清洗后的货源链接。
             spec: 去掉数量后的规格文本。
+            quantity: 商品SKU身份数量。
 
         Returns:
             dict[str, Any] | None: 商品SKU行；不存在时返回None。
@@ -248,9 +271,37 @@ class ProductSkuDatabase(PostgresClient):
             f"""
             select *
             from {self.schema_name}.product_sku
-            where source_url = %s and spec = %s
+            where source_url = %s
+              and spec = %s
+              and quantity = %s
+              and product_sku_type = %s
             """,
-            (source_url, spec),
+            (source_url, spec, quantity, PRODUCT_SKU_TYPE_NORMAL),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def find_forced_package_product_sku(
+        self,
+        conn: Connection[Any],
+        package_fingerprint: str,
+    ) -> dict[str, Any] | None:
+        """按强制合包指纹查找商品SKU。
+
+        Args:
+            conn: 当前事务连接。
+            package_fingerprint: 强制合包结构化明细指纹。
+
+        Returns:
+            dict[str, Any] | None: 商品SKU行；不存在时返回None。
+        """
+        row = conn.execute(
+            f"""
+            select *
+            from {self.schema_name}.product_sku
+            where product_sku_type = %s
+              and package_fingerprint = %s
+            """,
+            (PRODUCT_SKU_TYPE_FORCED_PACKAGE, package_fingerprint),
         ).fetchone()
         return dict(row) if row else None
 
@@ -265,6 +316,10 @@ class ProductSkuDatabase(PostgresClient):
         chinese_customs_name: str,
         logistics_attribute: str,
         product_name: str,
+        length_cm: Decimal | None = None,
+        width_cm: Decimal | None = None,
+        height_cm: Decimal | None = None,
+        is_direct_sales_unit: bool = False,
     ) -> ProductSkuRecord:
         """创建商品SKU和主货源记录。
 
@@ -277,6 +332,10 @@ class ProductSkuDatabase(PostgresClient):
             chinese_customs_name: 中文报关名。
             logistics_attribute: 产品属性。
             product_name: 商品SKU中文名称。
+            length_cm: 直接承接销售单元时的包装长。
+            width_cm: 直接承接销售单元时的包装宽。
+            height_cm: 直接承接销售单元时的包装高。
+            is_direct_sales_unit: 是否直接承接平台SKU销售单元。
 
         Returns:
             ProductSkuRecord: 新建后的商品SKU领域记录。
@@ -285,16 +344,20 @@ class ProductSkuDatabase(PostgresClient):
         row = conn.execute(
             f"""
             insert into {self.schema_name}.product_sku (
-                product_sku, source_url, spec, main_image_url, first_level_category,
+                product_sku, source_url, spec, quantity, product_sku_type,
+                main_image_url, first_level_category,
                 category_code, reference_purchase_price_rmb, reference_weight_g,
-                chinese_customs_name, logistics_attribute, note
-            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                chinese_customs_name, logistics_attribute, note,
+                length_cm, width_cm, height_cm, is_direct_sales_unit
+            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             returning *
             """,
             (
                 product_sku,
                 item.source_url,
                 item.spec,
+                item.quantity,
+                PRODUCT_SKU_TYPE_NORMAL,
                 main_image_url,
                 first_level_category,
                 category_code,
@@ -303,21 +366,26 @@ class ProductSkuDatabase(PostgresClient):
                 chinese_customs_name,
                 logistics_attribute,
                 item.source_note,
+                length_cm,
+                width_cm,
+                height_cm,
+                is_direct_sales_unit,
             ),
         ).fetchone()
         conn.execute(
             f"""
             insert into {self.schema_name}.product_sku_source (
-                product_sku, source_platform, source_url, spec, reference_purchase_price_rmb,
+                product_sku, source_platform, source_url, spec, quantity, reference_purchase_price_rmb,
                 reference_weight_g, source_status, is_primary, note
-            ) values (%s, %s, %s, %s, %s, %s, %s, true, %s)
-            on conflict (source_platform, source_url, spec) do nothing
+            ) values (%s, %s, %s, %s, %s, %s, %s, %s, true, %s)
+            on conflict (source_platform, source_url, spec, quantity) do nothing
             """,
             (
                 product_sku,
                 item.source_platform,
                 item.source_url,
                 item.spec,
+                item.quantity,
                 item.reference_purchase_price_rmb,
                 item.reference_weight_g,
                 SOURCE_STATUS_ACTIVE,
@@ -326,12 +394,97 @@ class ProductSkuDatabase(PostgresClient):
         )
         return product_record_from_row(dict(row), item, product_name, created=True)
 
+    def create_forced_package_product_sku(
+        self,
+        conn: Connection[Any],
+        *,
+        package_fingerprint: str,
+        package_details: tuple[dict[str, Any], ...],
+        category_code: str,
+        first_level_category: str,
+        main_image_url: str,
+        chinese_customs_name: str,
+        logistics_attribute: str,
+        product_name: str,
+        total_purchase_price_rmb: Decimal,
+        total_weight_g: Decimal,
+        note: str,
+        length_cm: Decimal | None = None,
+        width_cm: Decimal | None = None,
+        height_cm: Decimal | None = None,
+    ) -> ProductSkuRecord:
+        """创建强制合包商品SKU。
+
+        Args:
+            conn: 当前事务连接。
+            package_fingerprint: 强制合包结构化明细指纹。
+            package_details: 强制合包采购辨识明细。
+            category_code: 一级类目代号。
+            first_level_category: 一级类目英文名。
+            main_image_url: 主图链接。
+            chinese_customs_name: 中文报关名。
+            logistics_attribute: 产品属性。
+            product_name: 商品SKU中文名称。
+            total_purchase_price_rmb: 整包参考采购价。
+            total_weight_g: 整包参考重量，单位克。
+            note: 商品SKU备注。
+            length_cm: 直接承接销售单元时的包装长。
+            width_cm: 直接承接销售单元时的包装宽。
+            height_cm: 直接承接销售单元时的包装高。
+
+        Returns:
+            ProductSkuRecord: 新建后的强制合包商品SKU领域记录。
+        """
+        product_sku = self.next_product_sku_code(conn, category_code)
+        primary_detail = package_details[0]
+        row = conn.execute(
+            f"""
+            insert into {self.schema_name}.product_sku (
+                product_sku, source_url, spec, quantity, product_sku_type,
+                package_fingerprint, package_details_json, main_image_url,
+                first_level_category, category_code, reference_purchase_price_rmb,
+                reference_weight_g, chinese_customs_name, logistics_attribute, note,
+                length_cm, width_cm, height_cm, is_direct_sales_unit
+            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true)
+            returning *
+            """,
+            (
+                product_sku,
+                str(primary_detail["source_url"]),
+                str(primary_detail["spec"]),
+                1,
+                PRODUCT_SKU_TYPE_FORCED_PACKAGE,
+                package_fingerprint,
+                Jsonb(list(package_details)),
+                main_image_url,
+                first_level_category,
+                category_code,
+                total_purchase_price_rmb,
+                total_weight_g,
+                chinese_customs_name,
+                logistics_attribute,
+                note,
+                length_cm,
+                width_cm,
+                height_cm,
+            ),
+        ).fetchone()
+        return product_record_from_row(dict(row), None, product_name, created=True)
+
     def update_product_sku_latest_fields(
         self,
         conn: Connection[Any],
         *,
         product_sku: str,
         logistics_attribute: str,
+        reference_purchase_price_rmb: Decimal | None = None,
+        reference_weight_g: Decimal | None = None,
+        chinese_customs_name: str = "",
+        note: str | None = None,
+        length_cm: Decimal | None = None,
+        width_cm: Decimal | None = None,
+        height_cm: Decimal | None = None,
+        is_direct_sales_unit: bool = False,
     ) -> dict[str, Any]:
         """用最新输入覆盖商品SKU平台属性字段。
 
@@ -339,6 +492,14 @@ class ProductSkuDatabase(PostgresClient):
             conn: 当前事务连接。
             product_sku: 商品SKU编码。
             logistics_attribute: 最新输入的产品属性。
+            reference_purchase_price_rmb: 最新参考采购价。
+            reference_weight_g: 最新参考重量，单位克。
+            chinese_customs_name: 最新中文报关名。
+            note: 最新备注；None表示不覆盖。
+            length_cm: 直接承接销售单元时的包装长。
+            width_cm: 直接承接销售单元时的包装宽。
+            height_cm: 直接承接销售单元时的包装高。
+            is_direct_sales_unit: 是否按直接销售单元覆盖尺寸。
 
         Returns:
             dict[str, Any]: 更新后的product_sku行。
@@ -347,12 +508,47 @@ class ProductSkuDatabase(PostgresClient):
             f"""
             update {self.schema_name}.product_sku
             set logistics_attribute = %s,
+                reference_purchase_price_rmb = coalesce(%s, reference_purchase_price_rmb),
+                reference_weight_g = coalesce(%s, reference_weight_g),
+                chinese_customs_name = coalesce(nullif(%s, ''), chinese_customs_name),
+                note = case when %s then %s else note end,
+                length_cm = case when %s then %s else length_cm end,
+                width_cm = case when %s then %s else width_cm end,
+                height_cm = case when %s then %s else height_cm end,
+                is_direct_sales_unit = is_direct_sales_unit or %s,
                 updated_at = now() at time zone 'Asia/Shanghai'
             where product_sku = %s
             returning *
             """,
-            (logistics_attribute, product_sku),
+            (
+                logistics_attribute,
+                reference_purchase_price_rmb,
+                reference_weight_g,
+                chinese_customs_name,
+                note is not None,
+                note,
+                is_direct_sales_unit,
+                length_cm,
+                is_direct_sales_unit,
+                width_cm,
+                is_direct_sales_unit,
+                height_cm,
+                is_direct_sales_unit,
+                product_sku,
+            ),
         ).fetchone()
+        conn.execute(
+            f"""
+            update {self.schema_name}.product_sku_source
+            set reference_purchase_price_rmb = coalesce(%s, reference_purchase_price_rmb),
+                reference_weight_g = coalesce(%s, reference_weight_g),
+                note = case when %s then %s else note end,
+                updated_at = now() at time zone 'Asia/Shanghai'
+            where product_sku = %s
+              and is_primary = true
+            """,
+            (reference_purchase_price_rmb, reference_weight_g, note is not None, note, product_sku),
+        )
         return dict(row)
 
     def next_product_sku_code(self, conn: Connection[Any], category_code: str) -> str:
@@ -465,6 +661,9 @@ class ProductSkuDatabase(PostgresClient):
         logistics_attribute: str,
         note: str,
         source_urls: tuple[str, ...],
+        length_cm: Decimal | None = None,
+        width_cm: Decimal | None = None,
+        height_cm: Decimal | None = None,
     ) -> BundleSkuRecord:
         """创建组合SKU及其明细。
 
@@ -479,6 +678,9 @@ class ProductSkuDatabase(PostgresClient):
             logistics_attribute: 产品属性。
             note: 备注。
             source_urls: 组合内商品SKU对应的货源链接。
+            length_cm: 组合SKU销售包装长。
+            width_cm: 组合SKU销售包装宽。
+            height_cm: 组合SKU销售包装高。
 
         Returns:
             BundleSkuRecord: 新建后的组合SKU领域记录。
@@ -492,8 +694,9 @@ class ProductSkuDatabase(PostgresClient):
             insert into {self.schema_name}.bundle_sku (
                 bundle_sku, bundle_name, detail_fingerprint, total_product_count,
                 distinct_product_sku_count, main_image_url, chinese_customs_name,
-                reference_total_purchase_price_rmb, reference_total_weight_g, logistics_attribute, note
-            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                reference_total_purchase_price_rmb, reference_total_weight_g, logistics_attribute, note,
+                length_cm, width_cm, height_cm
+            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             returning *
             """,
             (
@@ -508,6 +711,9 @@ class ProductSkuDatabase(PostgresClient):
                 total_weight_g,
                 logistics_attribute,
                 note,
+                length_cm,
+                width_cm,
+                height_cm,
             ),
         ).fetchone()
         for product_sku, quantity in sorted(items, key=lambda item_pair: item_pair[0]):
@@ -527,6 +733,13 @@ class ProductSkuDatabase(PostgresClient):
         *,
         bundle_sku: str,
         logistics_attribute: str,
+        reference_total_purchase_price_rmb: Decimal,
+        reference_total_weight_g: Decimal,
+        chinese_customs_name: str,
+        note: str,
+        length_cm: Decimal | None,
+        width_cm: Decimal | None,
+        height_cm: Decimal | None,
     ) -> dict[str, Any]:
         """用最新输入覆盖组合SKU平台属性字段。
 
@@ -534,6 +747,13 @@ class ProductSkuDatabase(PostgresClient):
             conn: 当前事务连接。
             bundle_sku: 组合SKU编码。
             logistics_attribute: 最新输入的产品属性。
+            reference_total_purchase_price_rmb: 最新参考采购总价。
+            reference_total_weight_g: 最新参考总重量，单位克。
+            chinese_customs_name: 最新中文报关名。
+            note: 最新备注。
+            length_cm: 最新包装长。
+            width_cm: 最新包装宽。
+            height_cm: 最新包装高。
 
         Returns:
             dict[str, Any]: 更新后的bundle_sku行。
@@ -542,11 +762,28 @@ class ProductSkuDatabase(PostgresClient):
             f"""
             update {self.schema_name}.bundle_sku
             set logistics_attribute = %s,
+                reference_total_purchase_price_rmb = %s,
+                reference_total_weight_g = %s,
+                chinese_customs_name = coalesce(nullif(%s, ''), chinese_customs_name),
+                note = %s,
+                length_cm = %s,
+                width_cm = %s,
+                height_cm = %s,
                 updated_at = now() at time zone 'Asia/Shanghai'
             where bundle_sku = %s
             returning *
             """,
-            (logistics_attribute, bundle_sku),
+            (
+                logistics_attribute,
+                reference_total_purchase_price_rmb,
+                reference_total_weight_g,
+                chinese_customs_name,
+                note,
+                length_cm,
+                width_cm,
+                height_cm,
+                bundle_sku,
+            ),
         ).fetchone()
         return dict(row)
 
@@ -657,6 +894,40 @@ class ProductSkuDatabase(PostgresClient):
             (platform_sku, mapping_target_type, mapping_target_sku),
         ).fetchone()
         if existing:
+            conn.execute(
+                f"""
+                update {self.schema_name}.sales_unit
+                set sales_unit_type = %s,
+                    main_image_url = %s,
+                    total_purchase_price_rmb = %s,
+                    total_weight_g = %s,
+                    length_cm = %s,
+                    width_cm = %s,
+                    height_cm = %s,
+                    logistics_attribute = %s,
+                    chinese_customs_name = %s,
+                    first_level_category = %s,
+                    development_note = %s,
+                    process_batch_id = %s,
+                    updated_at = now() at time zone 'Asia/Shanghai'
+                where id = %s
+                """,
+                (
+                    sales_unit_type,
+                    main_image_url,
+                    total_purchase_price_rmb,
+                    total_weight_g,
+                    length_cm,
+                    width_cm,
+                    height_cm,
+                    logistics_attribute,
+                    chinese_customs_name,
+                    first_level_category,
+                    development_note,
+                    process_batch_id,
+                    int(existing["id"]),
+                ),
+            )
             return int(existing["id"]), False
 
         row = conn.execute(
@@ -733,6 +1004,7 @@ class ProductSkuDatabase(PostgresClient):
         mapping_target_type: str,
         mapping_target_sku: str,
         note: str,
+        allow_rebind: bool = False,
     ) -> bool:
         """新建或幂等确认平台SKU映射。
 
@@ -744,9 +1016,10 @@ class ProductSkuDatabase(PostgresClient):
             mapping_target_type: 映射目标类型。
             mapping_target_sku: 映射目标SKU编码。
             note: 映射备注。
+            allow_rebind: 是否允许平台SKU从旧目标改绑到当前目标。
 
         Returns:
-            bool: 新建映射返回True；已有相同映射并更新辅助信息返回False。
+            bool: 新建或改绑映射返回True；已有相同映射并更新辅助信息返回False。
 
         Raises:
             ValueError: 平台SKU已绑定到不同目标时抛出。
@@ -759,7 +1032,22 @@ class ProductSkuDatabase(PostgresClient):
             existing_target = str(existing["mapping_target_sku"])
             existing_type = str(existing["mapping_target_type"])
             if existing_type != mapping_target_type or existing_target != mapping_target_sku:
-                raise ValueError("平台SKU已绑定不同映射目标")
+                if not allow_rebind:
+                    raise ValueError("平台SKU已绑定不同映射目标")
+                conn.execute(
+                    f"""
+                    update {self.schema_name}.platform_sku_mapping
+                    set shop_name = %s,
+                        sales_unit_id = %s,
+                        mapping_target_type = %s,
+                        mapping_target_sku = %s,
+                        note = %s,
+                        updated_at = now() at time zone 'Asia/Shanghai'
+                    where platform_sku = %s
+                    """,
+                    (shop_name, sales_unit_id, mapping_target_type, mapping_target_sku, note, platform_sku),
+                )
+                return True
             conn.execute(
                 f"""
                 update {self.schema_name}.platform_sku_mapping
@@ -856,6 +1144,70 @@ class ProductSkuDatabase(PostgresClient):
         if not row:
             return None
         return str(row["last_confirmed_hash"]) if row.get("last_confirmed_hash") else None
+
+    def get_dianxiaomi_confirmed_payload(self, object_type: str, object_key: str) -> dict[str, Any] | None:
+        """读取店小秘已确认哈希对应的历史导出状态。
+
+        Args:
+            object_type: 店小秘对象类型。
+            object_key: 对象唯一键。
+
+        Returns:
+            dict[str, Any] | None: 上次确认哈希对应的payload_json；找不到时返回None。
+        """
+        row = self.fetch_one(
+            f"""
+            select p.payload_json
+            from {self.schema_name}.dianxiaomi_sync_state s
+            join {self.schema_name}.dianxiaomi_export_plan p
+              on p.object_type = s.object_type
+             and p.object_key = s.object_key
+             and p.current_hash = s.last_confirmed_hash
+            where s.object_type = %s
+              and s.object_key = %s
+              and s.last_confirmed_hash is not null
+            order by p.created_at desc
+            limit 1
+            """,
+            (object_type, object_key),
+        )
+        if not row:
+            return None
+        payload = row.get("payload_json")
+        return payload if isinstance(payload, dict) else None
+
+    def list_pending_dianxiaomi_confirmations(self) -> list[dict[str, Any]]:
+        """统计尚未确认上传成功的店小秘导出记录。
+
+        Args:
+            None.
+
+        Returns:
+            list[dict[str, Any]]: 按批次、对象类型和导出动作聚合的未确认记录。
+        """
+        table_exists = self.fetch_one(
+            "select to_regclass(%s) as table_name",
+            (f"{self.schema_name}.dianxiaomi_sync_state",),
+        )
+        if not table_exists or not table_exists.get("table_name"):
+            return []
+
+        return self.fetch_all(
+            f"""
+            select
+                last_export_batch_id as process_batch_id,
+                object_type,
+                last_export_action as action_type,
+                count(*) as pending_count,
+                max(last_exported_at) as last_exported_at
+            from {self.schema_name}.dianxiaomi_sync_state
+            where sync_status = 'exported'
+              and last_export_action in ('create', 'update')
+              and last_export_hash is not null
+            group by last_export_batch_id, object_type, last_export_action
+            order by max(last_exported_at) desc, last_export_batch_id, object_type, last_export_action
+            """,
+        )
 
     def insert_dianxiaomi_export_plan(self, plan: DianxiaomiExportPlan) -> None:
         """写入店小秘导出计划。
@@ -973,7 +1325,7 @@ def new_process_batch_id(prefix: str = "sku_mgmt") -> str:
 
 def product_record_from_row(
     row: dict[str, Any],
-    item: ParsedSourceItem,
+    item: ParsedSourceItem | None,
     product_name: str,
     *,
     created: bool,
@@ -982,7 +1334,7 @@ def product_record_from_row(
 
     Args:
         row: product_sku表查询结果。
-        item: 已解析货源商品明细。
+        item: 已解析货源商品明细；强制合包商品SKU可为空。
         product_name: 商品SKU中文名称。
         created: 是否为本次新建。
 
@@ -992,8 +1344,12 @@ def product_record_from_row(
     return ProductSkuRecord(
         product_sku=str(row["product_sku"]),
         source_url=str(row["source_url"]),
-        source_platform=item.source_platform,
+        source_platform=item.source_platform if item else "",
         spec=str(row["spec"]),
+        quantity=int(row.get("quantity") or 1),
+        product_sku_type=str(row.get("product_sku_type") or PRODUCT_SKU_TYPE_NORMAL),
+        package_fingerprint=str(row["package_fingerprint"]) if row.get("package_fingerprint") else None,
+        package_details=tuple(row.get("package_details_json") or ()),
         product_name=product_name,
         main_image_url=str(row.get("main_image_url") or ""),
         first_level_category=str(row.get("first_level_category") or ""),
@@ -1003,6 +1359,10 @@ def product_record_from_row(
         chinese_customs_name=str(row.get("chinese_customs_name") or ""),
         logistics_attribute=str(row.get("logistics_attribute") or ""),
         note=str(row.get("note") or ""),
+        length_cm=row.get("length_cm"),
+        width_cm=row.get("width_cm"),
+        height_cm=row.get("height_cm"),
+        is_direct_sales_unit=bool(row.get("is_direct_sales_unit")),
         created=created,
     )
 
@@ -1038,5 +1398,8 @@ def bundle_record_from_row(
         logistics_attribute=str(row.get("logistics_attribute") or ""),
         note=str(row.get("note") or ""),
         source_urls=source_urls,
+        length_cm=row.get("length_cm"),
+        width_cm=row.get("width_cm"),
+        height_cm=row.get("height_cm"),
         created=created,
     )

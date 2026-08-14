@@ -4,7 +4,8 @@ database:
   sql_path: src/sql/001_create_sku_mgmt_tables.sql
 
 input:
-  platform_listing_file: data/input/platform_sku_sample.xlsx
+  platform_listing_supplement_file: data/input/platform_sku_supplement.xlsx
+  platform_listing_update_file: data/input/platform_sku_update.xlsx
 
 output:
   output_dir: data/output
