@@ -15,6 +15,7 @@ from apps.product_sku_management.src.domain.dianxiaomi_export_planner import (
     build_bundle_sku_payload,
     build_export_plan,
     build_product_sku_payload,
+    decimal_divide,
     platform_pair_plan,
     product_sku_plan,
 )
@@ -302,3 +303,53 @@ def product_record(
         height_cm=height_cm,
         is_direct_sales_unit=is_direct_sales_unit,
     )
+
+
+def test_build_product_sku_payload_uses_package_weight_and_price() -> None:
+    """商品SKU导出按整包(单品值×数量)输出重量与采购价，与 sales_unit 总重等价。"""
+    single = build_product_sku_payload(product_record(quantity=1), exchange_rate_usd=7)
+    multi = build_product_sku_payload(product_record(quantity=3), exchange_rate_usd=7)
+
+    # 单品(quantity=1)：整包 == 单品值
+    assert single["weight_g"] == Decimal("100")
+    assert single["purchase_price_rmb"] == Decimal("10")
+    assert single["declared_weight_g"] == Decimal("100")
+    assert single["declared_amount_usd"] == decimal_divide(Decimal("10"), 7)
+
+    # 多件(quantity=3)：整包 == 单品值 × 数量
+    assert multi["weight_g"] == Decimal("300")
+    assert multi["purchase_price_rmb"] == Decimal("30")
+    assert multi["declared_weight_g"] == Decimal("300")
+    assert multi["declared_amount_usd"] == decimal_divide(Decimal("30"), 7)
+
+
+def test_declared_amount_usd_uses_min_floor() -> None:
+    """申报金额低于店小秘下限0.1时按下限输出，正常价位与采购参考价不受影响。"""
+    # 商品SKU：0.5 / 7 ≈ 0.0714 低于下限
+    low_product = replace(product_record(quantity=1), reference_purchase_price_rmb=Decimal("0.5"))
+    low_payload = build_product_sku_payload(low_product, exchange_rate_usd=7)
+
+    assert low_payload["declared_amount_usd"] == Decimal("0.1")
+    # 采购参考价仍按整包原值输出，不被申报下限改写
+    assert low_payload["purchase_price_rmb"] == Decimal("0.5")
+    # 正常价位不被下限干扰
+    normal_payload = build_product_sku_payload(product_record(quantity=1), exchange_rate_usd=7)
+    assert normal_payload["declared_amount_usd"] > Decimal("0.1")
+
+    # 组合SKU同样受下限保护
+    low_bundle = BundleSkuRecord(
+        bundle_sku="ZH_260731_1_2_1",
+        bundle_name="2 个/组，红色*2",
+        total_product_count=2,
+        distinct_product_sku_count=1,
+        items=(("YS_260731_1", 2),),
+        main_image_url="https://example.com/a.jpg",
+        chinese_customs_name="玩具",
+        reference_total_purchase_price_rmb=Decimal("0.4"),
+        reference_total_weight_g=Decimal("300"),
+        logistics_attribute="普货",
+        note="",
+        source_urls=("https://detail.1688.com/offer/111.html",),
+    )
+
+    assert build_bundle_sku_payload(low_bundle, exchange_rate_usd=7)["declared_amount_usd"] == Decimal("0.1")

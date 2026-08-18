@@ -65,6 +65,44 @@ def test_export_bundle_sku_template_writes_sales_unit_dimensions(tmp_path) -> No
     assert row[8] == "1"
 
 
+def test_export_bundle_sku_template_applies_min_declared_amount(tmp_path) -> None:
+    """组合SKU整组采购价过低时，申报金额（USD）按店小秘下限0.1导出。"""
+    template_path = tmp_path / "template.xlsx"
+    output_path = tmp_path / "bundle.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["*组合sku", "包含的商品sku", "数量", "申报金额（USD）"])
+    workbook.save(template_path)
+
+    export_bundle_sku_template(
+        template_path,
+        output_path,
+        [
+            BundleSkuRecord(
+                bundle_sku="ZH_260814_1_2_1",
+                bundle_name="2 个/组，红色*2",
+                total_product_count=2,
+                distinct_product_sku_count=1,
+                items=(("YS_260814_1", 2),),
+                main_image_url="https://example.com/a.jpg",
+                chinese_customs_name="玩具",
+                reference_total_purchase_price_rmb=Decimal("0.4"),
+                reference_total_weight_g=Decimal("100"),
+                logistics_attribute="普货",
+                note="",
+            )
+        ],
+        exchange_rate_usd=6.8,
+    )
+
+    saved = load_workbook(output_path, data_only=True)
+    row = [cell.value for cell in saved.active[2]]
+    saved.close()
+
+    # 0.4 / 6.8 ≈ 0.06 低于下限，申报金额按 0.1 输出
+    assert Decimal(str(row[3])) == Decimal("0.1")
+
+
 def test_export_bundle_sku_template_repeats_bundle_sku_for_each_item_row(tmp_path) -> None:
     template_path = tmp_path / "template.xlsx"
     output_path = tmp_path / "bundle.xlsx"

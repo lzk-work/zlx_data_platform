@@ -26,6 +26,7 @@ from ..constants import (
     WORKFLOW_MODE_UPDATE,
     WORKFLOW_PLATFORM_LISTING_SUPPLEMENT,
     WORKFLOW_PLATFORM_LISTING_UPDATE,
+    dianxiaomi_export_template_name,
 )
 from ..domain.bundle_service import bundle_fingerprint, decide_bundle
 from ..domain.dianxiaomi_export_planner import bundle_sku_plan, platform_pair_plan, product_sku_plan
@@ -554,17 +555,17 @@ def export_action_types() -> tuple[str, str]:
 
 
 def dianxiaomi_template_path(output_dir: Path, object_name: str, action_type: str) -> Path:
-    """生成按对象和动作拆分的店小秘模板路径。
+    """生成按对象和动作拆分的店小秘模板路径（中文文件名，便于业务识别）。
 
     Args:
         output_dir: 本批次输出目录。
-        object_name: 对象文件名片段，如product_sku。
+        object_name: 对象类型，如product_sku。
         action_type: 店小秘动作，create或update。
 
     Returns:
         Path: 目标导出文件路径。
     """
-    return output_dir / f"dianxiaomi_{object_name}_{action_type}.xlsx"
+    return output_dir / dianxiaomi_export_template_name(object_name, action_type)
 
 
 def plan_with_action_export_file(

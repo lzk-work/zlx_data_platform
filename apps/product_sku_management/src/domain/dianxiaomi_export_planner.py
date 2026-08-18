@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from ..constants import (
+    DIANXIAOMI_MIN_DECLARED_AMOUNT_USD,
     DIANXIAOMI_OBJECT_BUNDLE_SKU,
     DIANXIAOMI_OBJECT_PLATFORM_PAIR,
     DIANXIAOMI_OBJECT_PRODUCT_SKU,
@@ -17,6 +18,8 @@ from ..constants import (
 )
 from ..models.domain_models import BundleSkuRecord, ProductSkuRecord
 from ..models.output_models import DianxiaomiExportPlan, PlatformPairExportRecord
+
+MIN_DECLARED_AMOUNT_USD = Decimal(DIANXIAOMI_MIN_DECLARED_AMOUNT_USD)
 
 
 def build_product_sku_payload(record: ProductSkuRecord, *, exchange_rate_usd: float) -> dict[str, Any]:
@@ -29,29 +32,34 @@ def build_product_sku_payload(record: ProductSkuRecord, *, exchange_rate_usd: fl
     Returns:
         dict[str, Any]: 参与哈希比较和模板导出的商品SKU字段。
     """
+    # 商品SKU按单品存储参考重量/采购价，导出店小秘时按整包（单品值 × 数量）输出，
+    # 与 sales_unit.total_weight_g / total_purchase_price_rmb 数学等价，无需改动数据库。
+    quantity = record.quantity
+    package_weight_g = record.reference_weight_g * quantity
+    package_purchase_price_rmb = record.reference_purchase_price_rmb * quantity
     return {
         "sku": record.product_sku,
         "name": record.product_name,
         "main_image_url": record.main_image_url,
-        "weight_g": record.reference_weight_g,
-        "purchase_price_rmb": record.reference_purchase_price_rmb,
+        "weight_g": package_weight_g,
+        "purchase_price_rmb": package_purchase_price_rmb,
         "source_url": product_source_url_text(record),
         "source_urls": product_source_urls(record),
         "spec": record.spec,
-        "quantity": record.quantity,
+        "quantity": quantity,
         "product_sku_type": record.product_sku_type,
         "package_fingerprint": record.package_fingerprint,
         "package_details": record.package_details,
         "note": record.note,
         "chinese_customs_name": record.chinese_customs_name,
         "logistics_attribute": record.logistics_attribute,
-        "declared_weight_g": record.reference_weight_g,
-        "declared_amount_usd": decimal_divide(record.reference_purchase_price_rmb, exchange_rate_usd),
+        "declared_weight_g": package_weight_g,
+        "declared_amount_usd": decimal_divide(package_purchase_price_rmb, exchange_rate_usd),
         "length_cm": record.length_cm,
         "width_cm": record.width_cm,
         "height_cm": record.height_cm,
         "is_direct_sales_unit": record.is_direct_sales_unit,
-}
+    }
 
 
 def product_source_urls(record: ProductSkuRecord) -> list[str]:
@@ -325,13 +333,13 @@ def normalize_payload(value: Any) -> Any:
 
 
 def decimal_divide(value: Decimal, divisor: float) -> Decimal:
-    """Decimal除法工具。
+    """按配置汇率折算店小秘申报金额，并保证不低于申报金额下限。
 
     Args:
-        value: 被除数。
-        divisor: 除数配置值。
+        value: 被除数，通常为整包采购价（RMB）。
+        divisor: 除数配置值，即人民币换美元汇率。
 
     Returns:
-        Decimal: 相除结果。
+        Decimal: 相除结果；低于申报金额下限时返回下限值。
     """
-    return value / Decimal(str(divisor))
+    return max(value / Decimal(str(divisor)), MIN_DECLARED_AMOUNT_USD)

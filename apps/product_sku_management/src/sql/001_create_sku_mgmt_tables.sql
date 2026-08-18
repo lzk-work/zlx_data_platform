@@ -223,7 +223,7 @@ create table if not exists sku_mgmt.process_batch (
     summary_json jsonb not null default '{}'::jsonb,
     created_at timestamp not null default (now() at time zone 'Asia/Shanghai'),
     updated_at timestamp not null default (now() at time zone 'Asia/Shanghai'),
-    constraint ck_process_batch_status check (status in ('running', 'success', 'partial_success', 'failed'))
+    constraint ck_process_batch_status check (status in ('running', 'success', 'partial_success', 'failed', 'rolled_back'))
 );
 
 create table if not exists sku_mgmt.process_row_log (
@@ -526,7 +526,7 @@ comment on table sku_mgmt.process_batch is '处理批次表，记录一次平台
 comment on column sku_mgmt.process_batch.process_batch_id is '处理批次ID。';
 comment on column sku_mgmt.process_batch.workflow_type is '工作流类型，platform_listing_supplement普通补充，platform_listing_update显式映射更新。';
 comment on column sku_mgmt.process_batch.input_file is '本次处理输入文件路径。';
-comment on column sku_mgmt.process_batch.status is '批次状态，running、success、partial_success或failed。';
+comment on column sku_mgmt.process_batch.status is '批次状态，running、success、partial_success、failed或rolled_back（已按批次作废）。';
 comment on column sku_mgmt.process_batch.input_rows is '输入总行数。';
 comment on column sku_mgmt.process_batch.success_rows is '成功处理行数。';
 comment on column sku_mgmt.process_batch.exception_rows is '异常行数。';

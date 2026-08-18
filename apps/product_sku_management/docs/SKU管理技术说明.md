@@ -661,15 +661,15 @@ previous_hash 不等于 current_hash -> update
 
 ## 13. 店小秘模板导出
 
-导出文件按对象和动作拆分：
+导出文件按对象和动作拆分（中文文件名，便于业务识别）：
 
 ```text
-dianxiaomi_product_sku_create.xlsx
-dianxiaomi_product_sku_update.xlsx
-dianxiaomi_bundle_sku_create.xlsx
-dianxiaomi_bundle_sku_update.xlsx
-dianxiaomi_platform_pair_create.xlsx
-dianxiaomi_platform_pair_update.xlsx
+商品SKU建立.xlsx
+商品SKU更新.xlsx
+组合SKU建立.xlsx
+组合SKU更新.xlsx
+配对关系建立.xlsx
+配对关系更新.xlsx
 ```
 
 商品SKU模板字段由代码写入：
@@ -701,6 +701,10 @@ dianxiaomi_platform_pair_update.xlsx
 商品SKU导出哈希包含 `quantity`、`source_urls`、`length_cm`、`width_cm`、`height_cm`、`is_direct_sales_unit` 和强制合包字段，避免不同数量、来源URL或尺寸状态被错误判断为同一对象状态。强制合包商品SKU的来源URL按全部明细货源链接去重后用换行拼接。
 
 导出 Excel 时，商品净重（g）、申报重量(g)、长（cm）、宽（cm）、高（cm）和申报金额（USD）按店小秘模板展示要求统一保留两位小数并四舍五入；该格式化只影响输出文件，不改变数据库中的原始数值和同步哈希判断。
+
+商品SKU按整包导出：`product_sku` 表中的 `reference_weight_g` / `reference_purchase_price_rmb` 存储的是单品值（组总值 ÷ 组内数量），导出店小秘时商品净重（g）、采购参考价（RMB）、申报重量(g)、申报金额（USD）统一按整包输出（单品值 × `quantity`），与 `sales_unit.total_weight_g` / `total_purchase_price_rmb` 数学等价。存储语义不变、历史数据不变；仅导出层做换算，同时参与同步哈希的 payload 也按整包口径，保证导出文件与哈希判断一致。
+
+申报金额（USD）设下限 `DIANXIAOMI_MIN_DECLARED_AMOUNT_USD = 0.1`：`整包采购价 ÷ 汇率` 低于 0.1 时按 0.1 申报（商品SKU 与组合SKU 一致）。该下限只作用于申报金额，采购参考价（RMB）仍按整包原值输出。哈希 payload 与导出文件同时应用下限，避免因取值差异误判为更新。
 
 组合SKU模板字段由代码写入：
 
@@ -777,8 +781,8 @@ process_row_log
 输出文件也会包含：
 
 ```text
-exception_records.xlsx
-process_row_log.xlsx
+异常记录.xlsx
+处理行日志.xlsx
 ```
 
 异常行不会写入商品SKU、组合SKU、销售单元和映射关系。

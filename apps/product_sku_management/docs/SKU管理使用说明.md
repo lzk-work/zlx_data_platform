@@ -374,11 +374,23 @@ source_url + spec + quantity
 
 待代码实现前需要确认：如果一个货源组里有多个产品但只填了一个采购价和重量，是否仍按组内总件数均摊到各商品SKU。
 
-店小秘申报金额按配置汇率计算：
+店小秘申报金额按配置汇率计算，并受最小申报金额下限约束：
 
 ```text
-申报金额USD = RMB金额 / exchange_rate_usd
+申报金额USD = max(RMB金额 / exchange_rate_usd, 0.1)
 ```
+
+下限 0.1 由 `DIANXIAOMI_MIN_DECLARED_AMOUNT_USD` 配置，商品SKU 与组合SKU 一致；只约束申报金额，采购参考价（RMB）仍按原值输出。
+
+商品SKU 导出店小秘时按整包口径输出：
+
+```text
+商品净重(g)/申报重量(g) = reference_weight_g × quantity
+采购参考价(RMB)         = reference_purchase_price_rmb × quantity
+申报金额(USD)           = max(采购参考价(RMB) / exchange_rate_usd, 0.1)
+```
+
+数据库中 `product_sku` 仍按单品值存储（组总值 ÷ 组内数量），整包换算只发生在导出层，历史数据不受影响。组合SKU 本身已按整组总值（`reference_total_weight_g` / `reference_total_purchase_price_rmb`）存储，直接导出即为整包值。
 
 店小秘模板导出时，重量、长宽高和申报金额（USD）统一保留两位小数并四舍五入；数据库内部仍按原始精度保存和判断。
 
@@ -430,15 +442,15 @@ sku_mgmt_YYYYMMDD_HHMMSS_xxxxxxxx
 sku_mgmt_dry_run_YYYYMMDD_HHMMSS_xxxxxxxx
 ```
 
-店小秘模板按新增和更新拆分：
+店小秘模板按新增和更新拆分（中文文件名，便于业务识别）：
 
 ```text
-dianxiaomi_product_sku_create.xlsx
-dianxiaomi_product_sku_update.xlsx
-dianxiaomi_bundle_sku_create.xlsx
-dianxiaomi_bundle_sku_update.xlsx
-dianxiaomi_platform_pair_create.xlsx
-dianxiaomi_platform_pair_update.xlsx
+商品SKU建立.xlsx
+商品SKU更新.xlsx
+组合SKU建立.xlsx
+组合SKU更新.xlsx
+配对关系建立.xlsx
+配对关系更新.xlsx
 ```
 
 如果某类 create/update 没有数据，程序不会生成对应的空店小秘模板文件。
@@ -446,11 +458,11 @@ dianxiaomi_platform_pair_update.xlsx
 辅助文件：
 
 ```text
-sales_unit_feedback.xlsx
-exception_records.xlsx
-process_row_log.xlsx
-platform_mapping_snapshot.xlsx
-dianxiaomi_export_plan.xlsx
+销售单元反馈.xlsx
+异常记录.xlsx
+处理行日志.xlsx
+平台映射快照.xlsx
+导出计划.xlsx
 batch_summary.json
 ```
 
@@ -506,7 +518,7 @@ batch_summary.json
 ```text
 1. 按当前输入表格式填写该平台SKU的新货源链接、规格、价格、重量、长宽高、属性等字段。
 2. 先运行 --mode update --dry-run。
-3. 检查输出目录中的 process_row_log.xlsx、sales_unit_feedback.xlsx、dianxiaomi_export_plan.xlsx。
+3. 检查输出目录中的 处理行日志.xlsx、销售单元反馈.xlsx、导出计划.xlsx。
 4. 确认新目标、旧目标平台配对更新都符合预期。
 5. 正式运行 --mode update。
 6. 上传本批次生成的店小秘模板。

@@ -1309,6 +1309,290 @@ class ProductSkuDatabase(PostgresClient):
             platform_skus=tuple(str(row["platform_sku"]) for row in rows),
         )
 
+    def list_batch_objects(self, process_batch_id: str) -> list[dict[str, Any]]:
+        """读取批次导出计划中记录的对象清单（create/update 类）。
+
+        这是按批次删除的账本来源：create 表示本批新建、可删；update 表示既有对象、主行不动。
+
+        Args:
+            process_batch_id: 批次ID。
+
+        Returns:
+            list[dict[str, Any]]: 对象类型 / 键 / 动作的清单。
+        """
+        return self.fetch_all(
+            f"""
+            select object_type, object_key, action_type
+            from {self.schema_name}.dianxiaomi_export_plan
+            where process_batch_id = %s
+              and action_type in ('create', 'update')
+            order by object_type, object_key
+            """,
+            (process_batch_id,),
+        )
+
+    def list_batch_dependents(self, process_batch_id: str) -> list[dict[str, Any]]:
+        """检查本批创建的对象是否被其他未作废批次依赖。
+
+        依赖类型：
+        - bundle_member：本批创建的商品SKU被其他批次建立的 bundle_sku_item 引用；
+        - mapping_target：本批创建的对象被其他批次建立的 platform_sku_mapping 引用。
+
+        命中任一项都意味着单独作废本批会破坏后续批次，应当禁止作废。
+
+        Args:
+            process_batch_id: 批次ID。
+
+        Returns:
+            list[dict[str, Any]]: 依赖清单；非空表示禁止作废。
+        """
+        return self.fetch_all(
+            f"""
+            select distinct 'bundle_member' as dep_type, bsi.bundle_sku as dependent_key,
+                   bsi.product_sku as created_key
+            from {self.schema_name}.bundle_sku_item bsi
+            join {self.schema_name}.dianxiaomi_export_plan ep
+              on ep.object_type = 'bundle_sku' and ep.object_key = bsi.bundle_sku
+             and ep.action_type = 'create' and ep.process_batch_id <> %s
+            join {self.schema_name}.process_batch pb
+              on pb.process_batch_id = ep.process_batch_id and pb.status <> 'rolled_back'
+            where bsi.product_sku in (
+                select object_key from {self.schema_name}.dianxiaomi_export_plan
+                where process_batch_id = %s and object_type = 'product_sku' and action_type = 'create'
+            )
+            union all
+            select distinct 'mapping_target' as dep_type, psm.platform_sku as dependent_key,
+                   psm.mapping_target_sku as created_key
+            from {self.schema_name}.platform_sku_mapping psm
+            join {self.schema_name}.dianxiaomi_export_plan ep
+              on ep.object_type = 'platform_pair' and ep.object_key = psm.mapping_target_sku
+             and ep.process_batch_id <> %s
+            join {self.schema_name}.process_batch pb
+              on pb.process_batch_id = ep.process_batch_id and pb.status <> 'rolled_back'
+            where psm.mapping_target_sku in (
+                select object_key from {self.schema_name}.dianxiaomi_export_plan
+                where process_batch_id = %s and object_type = 'platform_pair' and action_type = 'create'
+            )
+            """,
+            (process_batch_id, process_batch_id, process_batch_id, process_batch_id),
+        )
+
+    def delete_process_batch(self, process_batch_id: str, *, dry_run: bool = False) -> dict[str, Any]:
+        """按批次物理删除本批产出的业务数据（作废批次）。
+
+        仅删除本批「新建」的主数据与其映射关系；既有对象（action_type=update）的主行不删，
+        纯字段更新不处理，历史对象主行保留。依赖检查命中其他未作废批次时拒绝执行
+        （返回 blocked=True，不执行任何删除）。
+
+        删除会释放身份唯一槽，重跑可干净重建新码，且不影响基础版其它处理流程。
+
+        Args:
+            process_batch_id: 批次ID。
+            dry_run: True 时只返回将删除清单与影响行数，不执行删除。
+
+        Returns:
+            dict[str, Any]: 预览/执行结果。含 objects / delete_counts / blocked / dependencies。
+
+        Raises:
+            ValueError: 批次不存在。
+        """
+        batch = self.fetch_one(
+            f"select process_batch_id, status from {self.schema_name}.process_batch where process_batch_id = %s",
+            (process_batch_id,),
+        )
+        if not batch:
+            raise ValueError(f"批次不存在: {process_batch_id}")
+        if batch.get("status") == "rolled_back":
+            return {
+                "process_batch_id": process_batch_id,
+                "already_rolled_back": True,
+                "dry_run": dry_run,
+                "blocked": False,
+                "objects": {},
+                "delete_counts": {},
+                "dependencies": [],
+            }
+
+        objects = self.list_batch_objects(process_batch_id)
+        product_create = [str(r["object_key"]) for r in objects if r["object_type"] == "product_sku" and r["action_type"] == "create"]
+        product_update = [str(r["object_key"]) for r in objects if r["object_type"] == "product_sku" and r["action_type"] == "update"]
+        bundle_create = [str(r["object_key"]) for r in objects if r["object_type"] == "bundle_sku" and r["action_type"] == "create"]
+        bundle_update = [str(r["object_key"]) for r in objects if r["object_type"] == "bundle_sku" and r["action_type"] == "update"]
+        # 注意：platform_pair 行的 object_key 是 mapping_target_sku（商品/组合SKU编码），
+        # 不是平台码。因此下面删 platform_sku_mapping / sales_unit 时必须按 mapping_target_sku 定位，
+        # 而 dianxiaomi_sync_state 的 platform_pair 行 object_key 同样是 mapping_target_sku，可直接用。
+        platform_pair = [str(r["object_key"]) for r in objects if r["object_type"] == "platform_pair"]
+
+        dependencies = self.list_batch_dependents(process_batch_id)
+        blocked = len(dependencies) > 0
+
+        summary: dict[str, Any] = {
+            "process_batch_id": process_batch_id,
+            "dry_run": dry_run,
+            "blocked": blocked,
+            "dependencies": [
+                {"dep_type": d["dep_type"], "dependent_key": d["dependent_key"], "created_key": d["created_key"]}
+                for d in dependencies
+            ],
+            "objects": {
+                "product_sku_create": product_create,
+                "product_sku_update": product_update,
+                "bundle_sku_create": bundle_create,
+                "bundle_sku_update": bundle_update,
+                "platform_pair": platform_pair,
+            },
+        }
+        if blocked:
+            return summary
+
+        counts: dict[str, int] = {}
+        with self.transaction() as conn:
+
+            def cnt(sql: str, params: tuple) -> int:
+                row = conn.execute(sql, params).fetchone()
+                return int(row["n"]) if row else 0
+
+            if platform_pair:
+                counts["platform_sku_mapping"] = cnt(
+                    f"select count(*) as n from {self.schema_name}.platform_sku_mapping where mapping_target_sku = any(%s)",
+                    (platform_pair,),
+                )
+                counts["sales_unit"] = cnt(
+                    f"""
+                    select count(*) as n from {self.schema_name}.sales_unit
+                    where id in (
+                        select sales_unit_id from {self.schema_name}.platform_sku_mapping
+                        where mapping_target_sku = any(%s)
+                    )
+                    """,
+                    (platform_pair,),
+                )
+                counts["dianxiaomi_sync_state_platform_pair"] = cnt(
+                    f"""
+                    select count(*) as n from {self.schema_name}.dianxiaomi_sync_state
+                    where object_type = 'platform_pair' and object_key = any(%s)
+                    """,
+                    (platform_pair,),
+                )
+            if product_create:
+                counts["product_sku_source"] = cnt(
+                    f"select count(*) as n from {self.schema_name}.product_sku_source where product_sku = any(%s)",
+                    (product_create,),
+                )
+                counts["bundle_sku_item_member"] = cnt(
+                    f"select count(*) as n from {self.schema_name}.bundle_sku_item where product_sku = any(%s)",
+                    (product_create,),
+                )
+                counts["dianxiaomi_sync_state_product"] = cnt(
+                    f"""
+                    select count(*) as n from {self.schema_name}.dianxiaomi_sync_state
+                    where object_type = 'product_sku' and object_key = any(%s)
+                    """,
+                    (product_create,),
+                )
+                counts["product_sku"] = cnt(
+                    f"select count(*) as n from {self.schema_name}.product_sku where product_sku = any(%s)",
+                    (product_create,),
+                )
+            if bundle_create:
+                counts["bundle_sku_item"] = cnt(
+                    f"select count(*) as n from {self.schema_name}.bundle_sku_item where bundle_sku = any(%s)",
+                    (bundle_create,),
+                )
+                counts["dianxiaomi_sync_state_bundle"] = cnt(
+                    f"""
+                    select count(*) as n from {self.schema_name}.dianxiaomi_sync_state
+                    where object_type = 'bundle_sku' and object_key = any(%s)
+                    """,
+                    (bundle_create,),
+                )
+                counts["bundle_sku"] = cnt(
+                    f"select count(*) as n from {self.schema_name}.bundle_sku where bundle_sku = any(%s)",
+                    (bundle_create,),
+                )
+        summary["delete_counts"] = counts
+
+        if dry_run:
+            return summary
+
+        with self.transaction() as conn:
+            cur = conn
+            if platform_pair:
+                # platform_sku_mapping.sales_unit_id 对 sales_unit(id) 是 RESTRICT 外键，
+                # 必须先删映射解除引用、再删销售单元。先抓取本批平台对关联的销售单元 id。
+                rows = cur.execute(
+                    f"select distinct sales_unit_id from {self.schema_name}.platform_sku_mapping "
+                    f"where mapping_target_sku = any(%s)",
+                    (platform_pair,),
+                ).fetchall()
+                su_ids = [
+                    row["sales_unit_id"]
+                    for row in rows
+                    if row and row.get("sales_unit_id") is not None
+                ]
+                cur.execute(
+                    f"delete from {self.schema_name}.platform_sku_mapping where mapping_target_sku = any(%s)",
+                    (platform_pair,),
+                )
+                if su_ids:
+                    cur.execute(
+                        f"delete from {self.schema_name}.sales_unit where id = any(%s)",
+                        (su_ids,),
+                    )
+                cur.execute(
+                    f"""
+                    delete from {self.schema_name}.dianxiaomi_sync_state
+                    where object_type = 'platform_pair' and object_key = any(%s)
+                    """,
+                    (platform_pair,),
+                )
+            if product_create:
+                cur.execute(
+                    f"delete from {self.schema_name}.product_sku_source where product_sku = any(%s)",
+                    (product_create,),
+                )
+                cur.execute(
+                    f"delete from {self.schema_name}.bundle_sku_item where product_sku = any(%s)",
+                    (product_create,),
+                )
+                cur.execute(
+                    f"""
+                    delete from {self.schema_name}.dianxiaomi_sync_state
+                    where object_type = 'product_sku' and object_key = any(%s)
+                    """,
+                    (product_create,),
+                )
+                cur.execute(
+                    f"delete from {self.schema_name}.product_sku where product_sku = any(%s)",
+                    (product_create,),
+                )
+            if bundle_create:
+                cur.execute(
+                    f"delete from {self.schema_name}.bundle_sku_item where bundle_sku = any(%s)",
+                    (bundle_create,),
+                )
+                cur.execute(
+                    f"""
+                    delete from {self.schema_name}.dianxiaomi_sync_state
+                    where object_type = 'bundle_sku' and object_key = any(%s)
+                    """,
+                    (bundle_create,),
+                )
+                cur.execute(
+                    f"delete from {self.schema_name}.bundle_sku where bundle_sku = any(%s)",
+                    (bundle_create,),
+                )
+            cur.execute(
+                f"""
+                update {self.schema_name}.process_batch
+                set status = 'rolled_back', updated_at = now() at time zone 'Asia/Shanghai'
+                where process_batch_id = %s
+                """,
+                (process_batch_id,),
+            )
+        summary["rolled_back"] = True
+        return summary
+
 
 def new_process_batch_id(prefix: str = "sku_mgmt") -> str:
     """生成处理批次ID。

@@ -18,9 +18,9 @@ from apps.product_sku_management.src.workflows.platform_listing_supplement impor
 
 
 def test_dianxiaomi_template_path_splits_create_and_update(tmp_path) -> None:
-    assert dianxiaomi_template_path(tmp_path, "product_sku", EXPORT_ACTION_CREATE).name == "dianxiaomi_product_sku_create.xlsx"
-    assert dianxiaomi_template_path(tmp_path, "bundle_sku", EXPORT_ACTION_UPDATE).name == "dianxiaomi_bundle_sku_update.xlsx"
-    assert dianxiaomi_template_path(tmp_path, "platform_pair", EXPORT_ACTION_CREATE).name == "dianxiaomi_platform_pair_create.xlsx"
+    assert dianxiaomi_template_path(tmp_path, "product_sku", EXPORT_ACTION_CREATE).name == "商品SKU建立.xlsx"
+    assert dianxiaomi_template_path(tmp_path, "bundle_sku", EXPORT_ACTION_UPDATE).name == "组合SKU更新.xlsx"
+    assert dianxiaomi_template_path(tmp_path, "platform_pair", EXPORT_ACTION_CREATE).name == "配对关系建立.xlsx"
 
 
 def test_plan_with_action_export_file_keeps_skip_empty_and_routes_update(tmp_path) -> None:
@@ -49,7 +49,7 @@ def test_plan_with_action_export_file_keeps_skip_empty_and_routes_update(tmp_pat
 
     assert plan_with_action_export_file(skipped, tmp_path, "product_sku").export_file == ""
     assert plan_with_action_export_file(updated, tmp_path, "product_sku").export_file.endswith(
-        "dianxiaomi_product_sku_update.xlsx",
+        "商品SKU更新.xlsx",
     )
 
 

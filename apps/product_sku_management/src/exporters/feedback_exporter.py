@@ -36,27 +36,27 @@ def export_supporting_files(
     """
     output = Path(output_dir)
     write_rows(
-        output / "sales_unit_feedback.xlsx",
+        output / "销售单元反馈.xlsx",
         ["row_no", "platform_sku", "shop_name", "sales_unit_type", "mapping_target_type", "mapping_target_sku", "product_skus", "bundle_sku"],
         sales_unit_rows(sales_units, row_logs),
     )
     write_rows(
-        output / "exception_records.xlsx",
+        output / "异常记录.xlsx",
         ["row_no", "business_key", "exception_type", "exception_message", "suggested_action", "raw_row_json"],
         exception_rows(exceptions),
     )
     write_rows(
-        output / "process_row_log.xlsx",
+        output / "处理行日志.xlsx",
         ["row_no", "business_key", "sales_unit_type", "mapping_target_type", "mapping_target_sku", "product_skus", "bundle_sku", "branch_name", "result", "message"],
         row_log_rows(row_logs),
     )
     write_rows(
-        output / "platform_mapping_snapshot.xlsx",
+        output / "平台映射快照.xlsx",
         ["platform_sku", "shop_name", "mapping_target_type", "mapping_target_sku", "sales_unit_id"],
         snapshot_rows(sales_units),
     )
     write_rows(
-        output / "dianxiaomi_export_plan.xlsx",
+        output / "导出计划.xlsx",
         ["object_type", "object_key", "action_type", "reason", "current_hash", "previous_hash", "export_file", "payload_json"],
         export_plan_rows(export_plans),
     )

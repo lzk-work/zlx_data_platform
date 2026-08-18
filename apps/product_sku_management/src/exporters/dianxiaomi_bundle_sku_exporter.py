@@ -6,10 +6,12 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 from ..adapters.dianxiaomi_template_writer import write_template_rows
+from ..constants import DIANXIAOMI_MIN_DECLARED_AMOUNT_USD
 from ..domain.logistics_attribute import dianxiaomi_dangerous_transport_code
 from ..models.domain_models import BundleSkuRecord
 
 TWO_DECIMAL_PLACES = Decimal("0.01")
+MIN_DECLARED_AMOUNT_USD = Decimal(DIANXIAOMI_MIN_DECLARED_AMOUNT_USD)
 
 
 def export_bundle_sku_template(
@@ -97,16 +99,17 @@ def unique_bundle_skus(records: list[BundleSkuRecord]) -> list[BundleSkuRecord]:
 
 
 def decimal_divide(value: Decimal, divisor: float) -> Decimal:
-    """Decimal除法工具，并按店小秘申报金额要求保留两位小数。
+    """按配置汇率折算店小秘申报金额，保留两位小数并保证不低于申报金额下限。
 
     Args:
-        value: 被除数。
-        divisor: 除数配置值。
+        value: 被除数，通常为组合SKU整组采购价（RMB）。
+        divisor: 除数配置值，即人民币换美元汇率。
 
     Returns:
-        Decimal: 相除后四舍五入到两位小数的结果。
+        Decimal: 四舍五入到两位小数的申报金额；低于下限时返回下限值。
     """
-    return (value / Decimal(str(divisor))).quantize(TWO_DECIMAL_PLACES, rounding=ROUND_HALF_UP)
+    amount = max(value / Decimal(str(divisor)), MIN_DECLARED_AMOUNT_USD)
+    return amount.quantize(TWO_DECIMAL_PLACES, rounding=ROUND_HALF_UP)
 
 
 def decimal_to_two_places(value: Decimal | None) -> Decimal | None:
